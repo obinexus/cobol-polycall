@@ -1,0 +1,911 @@
+       >>SOURCE FORMAT IS FREE
+*> cobol-polycall tests against the REAL installed libpolycall (no mock).
+*>
+*>   polycall-test <repo-root>
+*>
+*> Covers the checklist of the core's docs/BINDING_ABI.md through the
+*> cobpc_* shim and POLYCALL-BRIDGE. GnuCOBOL has no threads, so the
+*> checks that need a second thread (cancel / close waking a blocked
+*> receive, concurrent senders) are reported as SKIP. Checks that need
+*> the C CLI read POLYCALL_CLI, POLYCALL_CLI_PEER, POLYCALL_RPC_ENDPOINT and
+*> POLYCALL_DEV_TOKEN (tests/run-real.sh); without them they print SKIP,
+*> never PASS. RETURN-CODE 1 on any FAIL.
+IDENTIFICATION DIVISION.
+PROGRAM-ID. POLYCALL-TEST.
+
+ENVIRONMENT DIVISION.
+INPUT-OUTPUT SECTION.
+FILE-CONTROL.
+    SELECT PAYLOAD-FILE ASSIGN TO "cbl_cli_payload.bin"
+        ORGANIZATION IS SEQUENTIAL
+        FILE STATUS IS WS-FS.
+    SELECT JSON-FILE ASSIGN TO WS-JSON-FILE-NAME
+        ORGANIZATION IS LINE SEQUENTIAL
+        FILE STATUS IS WS-FS.
+
+DATA DIVISION.
+FILE SECTION.
+FD  PAYLOAD-FILE.
+01  PAYLOAD-REC                 PIC X(16).
+FD  JSON-FILE.
+01  JSON-REC                    PIC X(4096).
+
+WORKING-STORAGE SECTION.
+COPY "POLYCALL-CONSTANTS.CPY".
+COPY "POLYCALL-STRUCTURES.CPY".
+
+01  WS-PASS                     BINARY-LONG VALUE 0.
+01  WS-FAIL                     BINARY-LONG VALUE 0.
+01  WS-SKIP                     BINARY-LONG VALUE 0.
+01  WS-CHECK-NAME               PIC X(100).
+01  WS-CHECK-DETAIL             PIC X(400).
+01  WS-OK                       PIC X VALUE "N".
+    88  IS-OK                   VALUE "Y".
+01  WS-WANT                     BINARY-LONG.
+01  WS-NUM-A                    PIC -(9)9.
+01  WS-NUM-B                    PIC -(9)9.
+01  WS-FS                       PIC XX.
+01  WS-CNT                      BINARY-LONG.
+01  WS-I                        BINARY-LONG.
+01  WS-T0                       BINARY-LONG.
+01  WS-T1                       BINARY-LONG.
+01  WS-NOW                      PIC X(21).
+
+01  WS-ROOT                     PIC X(400) VALUE SPACES.
+01  WS-CLI                      PIC X(400) VALUE SPACES.
+01  WS-CLI-PEER                 PIC X(128) VALUE SPACES.
+01  WS-RPC-EP                   PIC X(128) VALUE SPACES.
+01  WS-TOKEN                    PIC X(128) VALUE SPACES.
+01  WS-CMD                      PIC X(1200).
+01  WS-JSON-FILE-NAME           PIC X(64) VALUE "cbl_cli_recv.json".
+
+01  WS-JSON                     PIC X(8192).
+01  WS-JSON-CAP                 BINARY-LONG VALUE 8192.
+01  WS-JSON-LEN                 BINARY-LONG VALUE 0.
+01  WS-INPUT                    PIC X(256).
+01  WS-INPUT-LEN                BINARY-LONG VALUE 0.
+
+01  H-A                         BINARY-LONG VALUE 0.
+01  H-B                         BINARY-LONG VALUE 0.
+01  H-X                         BINARY-LONG VALUE 0.
+01  H-Y                         BINARY-LONG VALUE 0.
+01  EP-A                        PIC X(128).
+01  EP-B                        PIC X(128).
+01  EP-X                        PIC X(128).
+
+*> exchange "arguments"
+01  X-FROM                      BINARY-LONG.
+01  X-TO                        BINARY-LONG.
+01  X-FROM-ID                   PIC X(64).
+01  X-MID                       PIC X(64).
+01  X-LEN                       BINARY-LONG.
+01  X-ST-SEND                   BINARY-LONG.
+
+01  WS-SEND-BUF                 PIC X(1048577).
+01  WS-RECV-BUF                 PIC X(1048576).
+01  WS-RECV-CAP                 BINARY-LONG VALUE 1048576.
+01  WS-RECV-LEN                 BINARY-LONG VALUE 0.
+01  WS-TINY                     PIC X(4).
+01  WS-TINY-CAP                 BINARY-LONG VALUE 4.
+
+01  WS-UTF8                     PIC X(20)
+        VALUE X"68C3A96C6C6F20E29C9320F09F9A80".
+01  WS-UTF8-LEN                 BINARY-LONG VALUE 15.
+01  WS-BIN                      PIC X(7) VALUE X"000100FF7F0080".
+01  WS-INTEROP                  PIC X(16)
+        VALUE X"63626C0062696E01FF20C3A920656E64".
+01  WS-INTEROP-B64              PIC X(24) VALUE "Y2JsAGJpbgH/IMOpIGVuZA==".
+
+01  B-OPERATION                 PIC X(20).
+01  B-INPUT                     PIC X(1024).
+01  B-OUTPUT                    PIC X(1024).
+01  B-RESULT                    BINARY-LONG.
+01  B-EP                        PIC X(128).
+01  B-NODE                      PIC X(64).
+01  B-WORD                      PIC X(64).
+
+PROCEDURE DIVISION.
+MAIN-PARA.
+    ACCEPT WS-ROOT FROM ARGUMENT-VALUE
+    IF WS-ROOT = SPACES
+        MOVE "." TO WS-ROOT
+    END-IF
+    ACCEPT WS-CLI FROM ENVIRONMENT "POLYCALL_CLI"
+    ACCEPT WS-CLI-PEER FROM ENVIRONMENT "POLYCALL_CLI_PEER"
+    ACCEPT WS-RPC-EP FROM ENVIRONMENT "POLYCALL_RPC_ENDPOINT"
+    ACCEPT WS-TOKEN FROM ENVIRONMENT "POLYCALL_DEV_TOKEN"
+
+    CALL "cobpc_version" USING PC-VERSION PC-STATUS
+    CALL "cobpc_abi_version" USING PC-ABI PC-STATUS
+    MOVE PC-ABI TO WS-NUM-A
+    DISPLAY "cobol-polycall real-core tests: libpolycall "
+        FUNCTION TRIM(PC-VERSION) ", ABI " FUNCTION TRIM(WS-NUM-A)
+
+    PERFORM TEST-VERSION
+    PERFORM TEST-RUN-CONFIG
+    PERFORM TEST-CALL
+    PERFORM TEST-PEERS
+    PERFORM TEST-AUTH-TRANSPORT
+    PERFORM TEST-HANDLES
+    PERFORM TEST-BRIDGE
+    PERFORM TEST-INTEROP
+
+    MOVE WS-PASS TO WS-NUM-A
+    MOVE WS-FAIL TO WS-NUM-B
+    DISPLAY "SUMMARY pass=" FUNCTION TRIM(WS-NUM-A)
+        " fail=" FUNCTION TRIM(WS-NUM-B) WITH NO ADVANCING
+    MOVE WS-SKIP TO WS-NUM-A
+    DISPLAY " skip=" FUNCTION TRIM(WS-NUM-A)
+    IF WS-FAIL > 0
+        MOVE 1 TO RETURN-CODE
+    ELSE
+        MOVE 0 TO RETURN-CODE
+    END-IF
+    STOP RUN.
+
+*> ---- helpers --------------------------------------------------------------
+CHECK-RESULT.
+    IF IS-OK
+        ADD 1 TO WS-PASS
+        DISPLAY "PASS " FUNCTION TRIM(WS-CHECK-NAME)
+    ELSE
+        ADD 1 TO WS-FAIL
+        DISPLAY "FAIL " FUNCTION TRIM(WS-CHECK-NAME) " -- "
+            FUNCTION TRIM(WS-CHECK-DETAIL)
+    END-IF
+    MOVE SPACES TO WS-CHECK-DETAIL
+    MOVE "N" TO WS-OK.
+
+EXPECT-STATUS.
+    IF PC-STATUS = WS-WANT
+        MOVE "Y" TO WS-OK
+    ELSE
+        MOVE WS-WANT TO WS-NUM-A
+        MOVE PC-STATUS TO WS-NUM-B
+        CALL "cobpc_last_error" USING PC-DETAIL
+        STRING "expected " FUNCTION TRIM(WS-NUM-A) " got "
+            FUNCTION TRIM(WS-NUM-B) " " FUNCTION TRIM(PC-DETAIL)
+            DELIMITED BY SIZE INTO WS-CHECK-DETAIL
+        END-STRING
+    END-IF
+    PERFORM CHECK-RESULT.
+
+SKIP-CHECK.
+    ADD 1 TO WS-SKIP
+    DISPLAY "SKIP " FUNCTION TRIM(WS-CHECK-NAME) " -- "
+        FUNCTION TRIM(WS-CHECK-DETAIL)
+    MOVE SPACES TO WS-CHECK-DETAIL.
+
+NOW-CENTIS.
+    MOVE FUNCTION CURRENT-DATE TO WS-NOW
+    COMPUTE WS-T1 = FUNCTION NUMVAL(WS-NOW(9:2)) * 360000
+                  + FUNCTION NUMVAL(WS-NOW(11:2)) * 6000
+                  + FUNCTION NUMVAL(WS-NOW(13:2)) * 100
+                  + FUNCTION NUMVAL(WS-NOW(15:2)).
+
+RECV-INTO-BUF.
+    MOVE SPACES TO PC-SENDER PC-MESSAGE-ID
+    CALL "cobpc_peer_recv" USING X-TO PC-TIMEOUT-MS PC-SENDER PC-MESSAGE-ID
+        WS-RECV-BUF WS-RECV-CAP WS-RECV-LEN PC-STATUS.
+
+*> send WS-SEND-BUF(1:X-LEN) from X-FROM to X-TO, receive, compare
+EXCHANGE.
+    CALL "cobpc_peer_endpoint" USING X-TO EP-X PC-STATUS
+    MOVE 5000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_send" USING X-FROM EP-X WS-SEND-BUF X-LEN X-MID
+        PC-TIMEOUT-MS PC-STATUS
+    MOVE PC-STATUS TO X-ST-SEND
+    IF X-ST-SEND = PC-OK
+        PERFORM RECV-INTO-BUF
+    END-IF
+    IF X-ST-SEND = PC-OK AND PC-STATUS = PC-OK
+       AND PC-SENDER = X-FROM-ID AND PC-MESSAGE-ID = X-MID
+       AND WS-RECV-LEN = X-LEN
+        IF X-LEN = 0
+            MOVE "Y" TO WS-OK
+        ELSE
+            IF WS-RECV-BUF(1:X-LEN) = WS-SEND-BUF(1:X-LEN)
+                MOVE "Y" TO WS-OK
+            END-IF
+        END-IF
+    END-IF
+    IF NOT IS-OK
+        MOVE X-ST-SEND TO WS-NUM-A
+        MOVE PC-STATUS TO WS-NUM-B
+        STRING "send=" FUNCTION TRIM(WS-NUM-A) " recv=" FUNCTION TRIM(WS-NUM-B)
+            " sender=" FUNCTION TRIM(PC-SENDER) " id=" FUNCTION TRIM(PC-MESSAGE-ID)
+            DELIMITED BY SIZE INTO WS-CHECK-DETAIL
+        END-STRING
+    END-IF
+    PERFORM CHECK-RESULT.
+
+*> ---- tests ----------------------------------------------------------------
+TEST-VERSION.
+    CALL "cobpc_abi_version" USING PC-ABI PC-STATUS
+    MOVE "abi: binding ABI is 1 (BINARY-LONG round trip)" TO WS-CHECK-NAME
+    IF PC-ABI = PC-ABI-VERSION MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+    MOVE SPACES TO PC-VERSION
+    CALL "cobpc_version" USING PC-VERSION PC-STATUS
+    MOVE "version: library >= 1.1.0" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND PC-VERSION(1:2) = "1."
+       AND PC-VERSION >= "1.1.0"
+        MOVE "Y" TO WS-OK
+    END-IF
+    MOVE PC-VERSION TO WS-CHECK-DETAIL
+    PERFORM CHECK-RESULT
+    MOVE PC-E-TIMEOUT TO PC-STATUS
+    CALL "cobpc_strerror" USING PC-STATUS PC-STATUS-NAME
+    MOVE "strerror names E_TIMEOUT" TO WS-CHECK-NAME
+    IF PC-STATUS-NAME(1:18) = "POLYCALL_E_TIMEOUT" MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT.
+
+TEST-RUN-CONFIG.
+    MOVE SPACES TO PC-CONFIG-PATH
+    STRING FUNCTION TRIM(WS-ROOT) "/cobol-polycallrc" DELIMITED BY SIZE
+        INTO PC-CONFIG-PATH
+    MOVE 1 TO PC-RUN
+    CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
+    MOVE PC-OK TO WS-WANT
+    MOVE "run_config: shipped cobol-polycallrc (run=1)" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 0 TO PC-RUN
+    CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
+    MOVE "run_config: valid, validate-only" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    CALL "cobpc_describe" USING PC-CONFIG-PATH WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE "describe: JSON" TO WS-CHECK-NAME
+    MOVE 0 TO WS-CNT
+    INSPECT WS-JSON TALLYING WS-CNT FOR ALL "log_level"
+    IF PC-STATUS = PC-OK AND WS-JSON(1:1) = "{" AND WS-CNT > 0
+        MOVE "Y" TO WS-OK
+    END-IF
+    PERFORM CHECK-RESULT
+
+    MOVE SPACES TO PC-CONFIG-PATH
+    STRING FUNCTION TRIM(WS-ROOT) "/tests/fixtures/does-not-exist" DELIMITED BY SIZE
+        INTO PC-CONFIG-PATH
+    MOVE 1 TO PC-RUN
+    CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
+    MOVE PC-E-NOT-FOUND TO WS-WANT
+    MOVE "run_config: missing -> E_NOT_FOUND" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE PC-E-NOT-FOUND TO PC-STATUS
+    CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
+    CALL "cobpc_last_error" USING PC-DETAIL
+    CALL "cobpc_strerror" USING PC-STATUS PC-STATUS-NAME
+    MOVE 0 TO WS-CNT
+    INSPECT PC-DETAIL TALLYING WS-CNT FOR ALL "does-not-exist"
+    MOVE "status name + last_error detail" TO WS-CHECK-NAME
+    IF WS-CNT > 0 AND PC-STATUS-NAME(1:20) = "POLYCALL_E_NOT_FOUND"
+        MOVE "Y" TO WS-OK
+    END-IF
+    MOVE PC-DETAIL TO WS-CHECK-DETAIL
+    PERFORM CHECK-RESULT
+
+    MOVE SPACES TO PC-CONFIG-PATH
+    STRING FUNCTION TRIM(WS-ROOT) "/tests/fixtures/invalid-polycallrc" DELIMITED BY SIZE
+        INTO PC-CONFIG-PATH
+    MOVE 0 TO PC-RUN
+    CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
+    MOVE PC-E-CONFIG TO WS-WANT
+    MOVE "run_config: malformed -> E_CONFIG (validate)" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 1 TO PC-RUN
+    CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
+    MOVE "run_config: malformed -> E_CONFIG (strict)" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+
+    MOVE SPACES TO PC-CONFIG-PATH
+    STRING FUNCTION TRIM(WS-ROOT) "/tests/fixtures/unknown-key-polycallrc" DELIMITED BY SIZE
+        INTO PC-CONFIG-PATH
+    MOVE 0 TO PC-RUN
+    CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
+    MOVE PC-OK TO WS-WANT
+    MOVE "run_config: unknown key warns when validating" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 1 TO PC-RUN
+    CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
+    MOVE PC-E-CONFIG TO WS-WANT
+    MOVE "run_config: unknown key fails when strict" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+
+    MOVE SPACES TO PC-CONFIG-PATH
+    STRING FUNCTION TRIM(WS-ROOT) "/tests/fixtures/tls-polycallrc" DELIMITED BY SIZE
+        INTO PC-CONFIG-PATH
+    MOVE 0 TO PC-RUN
+    CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
+    MOVE PC-OK TO WS-WANT
+    MOVE "run_config: tls_enabled=true validates" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 1 TO PC-RUN
+    CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
+    MOVE PC-E-UNSUPPORTED TO WS-WANT
+    MOVE "run_config: tls strict -> E_UNSUPPORTED" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+
+    MOVE SPACES TO PC-CONFIG-PATH
+    CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
+    MOVE PC-E-INVALID-ARGUMENT TO WS-WANT
+    MOVE "run_config: blank path -> E_INVALID_ARGUMENT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS.
+
+TEST-CALL.
+    MOVE "127.0.0.1:1" TO PC-TARGET
+    MOVE "debug" TO PC-SERVICE
+    MOVE "echo" TO PC-OPERATION
+    MOVE "{}" TO WS-INPUT
+    MOVE 2 TO WS-INPUT-LEN
+    MOVE 1500 TO PC-TIMEOUT-MS
+    CALL "cobpc_call" USING PC-TARGET PC-SERVICE PC-OPERATION WS-INPUT WS-INPUT-LEN
+        PC-TIMEOUT-MS WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE PC-E-TRANSPORT TO WS-WANT
+    MOVE "call: no runtime -> E_TRANSPORT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    IF WS-RPC-EP = SPACES
+        MOVE "call: success / unknown op / deadline / invalid input" TO WS-CHECK-NAME
+        MOVE "POLYCALL_RPC_ENDPOINT not set (run via tests/run-real.sh)" TO WS-CHECK-DETAIL
+        PERFORM SKIP-CHECK
+        EXIT PARAGRAPH
+    END-IF
+    MOVE WS-RPC-EP TO PC-TARGET
+    MOVE "inventory" TO PC-SERVICE
+    MOVE "get" TO PC-OPERATION
+    MOVE '{"item_id":"widget-a"}' TO WS-INPUT
+    MOVE 22 TO WS-INPUT-LEN
+    MOVE 3000 TO PC-TIMEOUT-MS
+    CALL "cobpc_call" USING PC-TARGET PC-SERVICE PC-OPERATION WS-INPUT WS-INPUT-LEN
+        PC-TIMEOUT-MS WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE "call: inventory.get exact output" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND WS-JSON-LEN = 52
+       AND WS-JSON(1:52) = '{"item_id":"widget-a","quantity":42,"in_stock":true}'
+        MOVE "Y" TO WS-OK
+    END-IF
+    MOVE WS-JSON(1:200) TO WS-CHECK-DETAIL
+    PERFORM CHECK-RESULT
+
+    MOVE "debug" TO PC-SERVICE
+    MOVE "echo" TO PC-OPERATION
+    MOVE 0 TO WS-INPUT-LEN
+    CALL "cobpc_call" USING PC-TARGET PC-SERVICE PC-OPERATION WS-INPUT WS-INPUT-LEN
+        PC-TIMEOUT-MS WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE "call: empty input is sent as null" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND WS-JSON(1:WS-JSON-LEN) = '{"echo":null}'
+        MOVE "Y" TO WS-OK
+    END-IF
+    PERFORM CHECK-RESULT
+
+    MOVE "inventory" TO PC-SERVICE
+    MOVE "teleport" TO PC-OPERATION
+    MOVE "{}" TO WS-INPUT
+    MOVE 2 TO WS-INPUT-LEN
+    CALL "cobpc_call" USING PC-TARGET PC-SERVICE PC-OPERATION WS-INPUT WS-INPUT-LEN
+        PC-TIMEOUT-MS WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE PC-E-NOT-FOUND TO WS-WANT
+    MOVE "call: unknown operation -> E_NOT_FOUND" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 0 TO WS-CNT
+    INSPECT WS-JSON TALLYING WS-CNT FOR ALL "operation.unknown"
+    MOVE "call: unknown operation error object" TO WS-CHECK-NAME
+    IF WS-CNT > 0 MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+
+    MOVE "get" TO PC-OPERATION
+    MOVE '{"item_id":"nope"}' TO WS-INPUT
+    MOVE 18 TO WS-INPUT-LEN
+    CALL "cobpc_call" USING PC-TARGET PC-SERVICE PC-OPERATION WS-INPUT WS-INPUT-LEN
+        PC-TIMEOUT-MS WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE PC-E-REMOTE TO WS-WANT
+    MOVE "call: unknown item -> E_REMOTE" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+
+    MOVE "debug" TO PC-SERVICE
+    MOVE "sleep" TO PC-OPERATION
+    MOVE '{"ms":3000}' TO WS-INPUT
+    MOVE 11 TO WS-INPUT-LEN
+    MOVE 200 TO PC-TIMEOUT-MS
+    CALL "cobpc_call" USING PC-TARGET PC-SERVICE PC-OPERATION WS-INPUT WS-INPUT-LEN
+        PC-TIMEOUT-MS WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE PC-E-TIMEOUT TO WS-WANT
+    MOVE "call: deadline -> E_TIMEOUT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+
+    MOVE "echo" TO PC-OPERATION
+    MOVE "{not json" TO WS-INPUT
+    MOVE 9 TO WS-INPUT-LEN
+    MOVE 1000 TO PC-TIMEOUT-MS
+    CALL "cobpc_call" USING PC-TARGET PC-SERVICE PC-OPERATION WS-INPUT WS-INPUT-LEN
+        PC-TIMEOUT-MS WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE PC-E-INVALID-ARGUMENT TO WS-WANT
+    MOVE "call: invalid input JSON -> E_INVALID_ARGUMENT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS.
+
+TEST-PEERS.
+    MOVE "cbl-a" TO PC-NODE-ID
+    MOVE "127.0.0.1:0" TO PC-BIND-ENDPOINT
+    MOVE SPACES TO PC-AUTH-TOKEN
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-A PC-STATUS
+    MOVE PC-OK TO WS-WANT
+    MOVE "peer: open a" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE "cbl-b" TO PC-NODE-ID
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-B PC-STATUS
+    MOVE "peer: open b" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    CALL "cobpc_peer_endpoint" USING H-A EP-A PC-STATUS
+    CALL "cobpc_peer_endpoint" USING H-B EP-B PC-STATUS
+    MOVE "peer: ephemeral endpoint" TO WS-CHECK-NAME
+    IF EP-A(1:10) = "127.0.0.1:" AND EP-A NOT = "127.0.0.1:0"
+        MOVE "Y" TO WS-OK
+    END-IF
+    MOVE EP-A TO WS-CHECK-DETAIL
+    PERFORM CHECK-RESULT
+    CALL "cobpc_peer_node_id" USING H-A PC-NODE-ID PC-STATUS
+    MOVE "peer: node_id" TO WS-CHECK-NAME
+    IF PC-NODE-ID = "cbl-a" MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+    CALL "cobpc_peer_health" USING H-A WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE 0 TO WS-CNT
+    INSPECT WS-JSON TALLYING WS-CNT FOR ALL '"node_id":"cbl-a"'
+    MOVE "peer: health JSON" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND WS-CNT > 0 MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+
+    *> payload matrix, both directions
+    MOVE 0 TO X-LEN
+    MOVE H-A TO X-FROM  MOVE H-B TO X-TO  MOVE "cbl-a" TO X-FROM-ID
+    MOVE "m-empty-ab" TO X-MID
+    MOVE "peer a->b: empty payload" TO WS-CHECK-NAME
+    PERFORM EXCHANGE
+    MOVE H-B TO X-FROM  MOVE H-A TO X-TO  MOVE "cbl-b" TO X-FROM-ID
+    MOVE "m-empty-ba" TO X-MID
+    MOVE "peer b->a: empty payload" TO WS-CHECK-NAME
+    PERFORM EXCHANGE
+    MOVE WS-UTF8 TO WS-SEND-BUF(1:20)
+    MOVE WS-UTF8-LEN TO X-LEN
+    MOVE H-A TO X-FROM  MOVE H-B TO X-TO  MOVE "cbl-a" TO X-FROM-ID
+    MOVE "m-utf8-ab" TO X-MID
+    MOVE "peer a->b: UTF-8" TO WS-CHECK-NAME
+    PERFORM EXCHANGE
+    MOVE H-B TO X-FROM  MOVE H-A TO X-TO  MOVE "cbl-b" TO X-FROM-ID
+    MOVE "m-utf8-ba" TO X-MID
+    MOVE "peer b->a: UTF-8" TO WS-CHECK-NAME
+    PERFORM EXCHANGE
+    MOVE WS-BIN TO WS-SEND-BUF(1:7)
+    MOVE 7 TO X-LEN
+    MOVE H-A TO X-FROM  MOVE H-B TO X-TO  MOVE "cbl-a" TO X-FROM-ID
+    MOVE "m-bin-ab" TO X-MID
+    MOVE "peer a->b: binary with NUL" TO WS-CHECK-NAME
+    PERFORM EXCHANGE
+    MOVE H-B TO X-FROM  MOVE H-A TO X-TO  MOVE "cbl-b" TO X-FROM-ID
+    MOVE "m-bin-ba" TO X-MID
+    MOVE "peer b->a: binary with NUL" TO WS-CHECK-NAME
+    PERFORM EXCHANGE
+    PERFORM VARYING WS-I FROM 1 BY 1 UNTIL WS-I > 1048577
+        MOVE FUNCTION CHAR(FUNCTION MOD((WS-I - 1) * 31 + 7, 256) + 1)
+          TO WS-SEND-BUF(WS-I:1)
+    END-PERFORM
+    MOVE 1048576 TO X-LEN
+    MOVE H-A TO X-FROM  MOVE H-B TO X-TO  MOVE "cbl-a" TO X-FROM-ID
+    MOVE "m-mib-ab" TO X-MID
+    MOVE "peer a->b: exactly 1 MiB" TO WS-CHECK-NAME
+    PERFORM EXCHANGE
+    MOVE H-B TO X-FROM  MOVE H-A TO X-TO  MOVE "cbl-b" TO X-FROM-ID
+    MOVE "m-mib-ba" TO X-MID
+    MOVE "peer b->a: exactly 1 MiB" TO WS-CHECK-NAME
+    PERFORM EXCHANGE
+    MOVE 1048577 TO X-LEN
+    MOVE "m-over" TO X-MID
+    MOVE 5000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_send" USING H-A EP-B WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    MOVE PC-E-TOO-LARGE TO WS-WANT
+    MOVE "peer: 1 MiB + 1 -> E_TOO_LARGE" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE H-B TO X-TO
+    MOVE 200 TO PC-TIMEOUT-MS
+    PERFORM RECV-INTO-BUF
+    MOVE PC-E-TIMEOUT TO WS-WANT
+    MOVE "peer: oversize payload never delivered" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+
+    *> registry ownership
+    MOVE "cbl-b" TO PC-PEER-ID
+    CALL "cobpc_peer_register" USING H-A PC-PEER-ID EP-B PC-STATUS
+    MOVE PC-OK TO WS-WANT
+    MOVE "registry: register on a" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    CALL "cobpc_peer_list" USING H-A WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE 0 TO WS-CNT
+    INSPECT WS-JSON TALLYING WS-CNT FOR ALL '"cbl-b":"'
+    MOVE "registry: a lists cbl-b" TO WS-CHECK-NAME
+    IF WS-CNT > 0 MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+    CALL "cobpc_peer_list" USING H-B WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE "registry: b's registry is its own (empty)" TO WS-CHECK-NAME
+    IF WS-JSON-LEN = 2 AND WS-JSON(1:2) = "{}" MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+    MOVE "by-id" TO WS-SEND-BUF(1:5)
+    MOVE 5 TO X-LEN
+    MOVE "cbl-b" TO PC-TARGET
+    MOVE "m-by-id" TO X-MID
+    MOVE 5000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_send" USING H-A PC-TARGET WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    MOVE "registry: send by registered id" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE H-B TO X-TO
+    PERFORM RECV-INTO-BUF
+    MOVE "registry: received from cbl-a" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND PC-SENDER = "cbl-a" AND WS-RECV-BUF(1:5) = "by-id"
+        MOVE "Y" TO WS-OK
+    END-IF
+    PERFORM CHECK-RESULT
+    CALL "cobpc_peer_list" USING H-B WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE "registry: receiving does not register the sender" TO WS-CHECK-NAME
+    IF WS-JSON-LEN = 2 AND WS-JSON(1:2) = "{}" MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+    MOVE "cbl-b" TO PC-TARGET
+    MOVE 3000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_ping" USING H-A PC-TARGET PC-TIMEOUT-MS PC-STATUS
+    MOVE PC-OK TO WS-WANT
+    MOVE "ping: registered id" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    CALL "cobpc_peer_ping" USING H-A EP-B PC-TIMEOUT-MS PC-STATUS
+    MOVE "ping: host:port" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE "impostor" TO PC-PEER-ID
+    CALL "cobpc_peer_register" USING H-A PC-PEER-ID EP-B PC-STATUS
+    MOVE "impostor" TO PC-TARGET
+    CALL "cobpc_peer_ping" USING H-A PC-TARGET PC-TIMEOUT-MS PC-STATUS
+    MOVE PC-E-PROTOCOL TO WS-WANT
+    MOVE "ping: id answered by another node -> E_PROTOCOL" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    CALL "cobpc_peer_unregister" USING H-A PC-PEER-ID PC-STATUS
+    MOVE PC-OK TO WS-WANT
+    MOVE "registry: unregister" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    CALL "cobpc_peer_unregister" USING H-A PC-PEER-ID PC-STATUS
+    MOVE PC-E-NOT-FOUND TO WS-WANT
+    MOVE "registry: unregister unknown -> E_NOT_FOUND" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE "bad id!" TO PC-PEER-ID
+    CALL "cobpc_peer_register" USING H-A PC-PEER-ID EP-B PC-STATUS
+    MOVE PC-E-INVALID-ARGUMENT TO WS-WANT
+    MOVE "registry: invalid id -> E_INVALID_ARGUMENT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 4 TO WS-JSON-LEN
+    CALL "cobpc_peer_list" USING H-A WS-TINY WS-TINY-CAP WS-JSON-LEN PC-STATUS
+    MOVE PC-E-TOO-LARGE TO WS-WANT
+    MOVE "list: 4-byte field -> E_TOO_LARGE" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+
+    *> duplicate message id
+    MOVE "dup" TO WS-SEND-BUF(1:3)
+    MOVE 3 TO X-LEN
+    MOVE "m-dup" TO X-MID
+    MOVE 5000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_send" USING H-A EP-B WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    CALL "cobpc_peer_send" USING H-A EP-B WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    MOVE PC-OK TO WS-WANT
+    MOVE "duplicate: resend acknowledged" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE H-B TO X-TO
+    PERFORM RECV-INTO-BUF
+    MOVE "duplicate: first copy delivered" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND PC-MESSAGE-ID = "m-dup" MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+    MOVE 300 TO PC-TIMEOUT-MS
+    PERFORM RECV-INTO-BUF
+    MOVE PC-E-TIMEOUT TO WS-WANT
+    MOVE "duplicate: second copy dropped" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+
+    *> generated message id
+    MOVE SPACES TO X-MID
+    MOVE 5000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_send" USING H-A EP-B WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    PERFORM RECV-INTO-BUF
+    MOVE "send: SPACES message id is generated by the core" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND PC-MESSAGE-ID NOT = SPACES MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+
+    *> receive timeout
+    PERFORM NOW-CENTIS
+    MOVE WS-T1 TO WS-T0
+    MOVE 150 TO PC-TIMEOUT-MS
+    PERFORM RECV-INTO-BUF
+    MOVE PC-E-TIMEOUT TO WS-WANT
+    MOVE "recv: timeout -> E_TIMEOUT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    PERFORM NOW-CENTIS
+    MOVE "recv: waited for the timeout" TO WS-CHECK-NAME
+    IF WS-T1 - WS-T0 >= 10 OR WS-T1 < WS-T0 MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+
+    *> too-small buffer leaves the message queued
+    MOVE "0123456789" TO WS-SEND-BUF(1:10)
+    MOVE 10 TO X-LEN
+    MOVE "m-small" TO X-MID
+    MOVE 5000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_send" USING H-A EP-B WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    CALL "cobpc_peer_recv" USING H-B PC-TIMEOUT-MS PC-SENDER PC-MESSAGE-ID
+        WS-TINY WS-TINY-CAP WS-RECV-LEN PC-STATUS
+    MOVE PC-E-TOO-LARGE TO WS-WANT
+    MOVE "recv: 4-byte field -> E_TOO_LARGE" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE "recv: needed size reported" TO WS-CHECK-NAME
+    IF WS-RECV-LEN = 10 MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+    MOVE H-B TO X-TO
+    MOVE 1000 TO PC-TIMEOUT-MS
+    PERFORM RECV-INTO-BUF
+    MOVE "recv: message stayed queued" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND WS-RECV-LEN = 10 AND WS-RECV-BUF(1:10) = "0123456789"
+       AND PC-MESSAGE-ID = "m-small"
+        MOVE "Y" TO WS-OK
+    END-IF
+    PERFORM CHECK-RESULT
+
+    *> send-only node
+    MOVE "cbl-sendonly" TO PC-NODE-ID
+    MOVE SPACES TO PC-BIND-ENDPOINT PC-AUTH-TOKEN
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-X PC-STATUS
+    CALL "cobpc_peer_endpoint" USING H-X EP-X PC-STATUS
+    MOVE "send-only: SPACES bind -> no endpoint" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND EP-X = SPACES MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+    MOVE "m-so" TO X-MID
+    CALL "cobpc_peer_send" USING H-X EP-B WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    PERFORM RECV-INTO-BUF
+    MOVE "send-only: can send" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND PC-SENDER = "cbl-sendonly" MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+    CALL "cobpc_peer_close" USING H-X PC-STATUS
+    CALL "cobpc_peer_close" USING H-A PC-STATUS
+    CALL "cobpc_peer_close" USING H-B PC-STATUS.
+
+TEST-AUTH-TRANSPORT.
+    MOVE "cbl-secured" TO PC-NODE-ID
+    MOVE "127.0.0.1:0" TO PC-BIND-ENDPOINT
+    MOVE "qa-secret-1" TO PC-AUTH-TOKEN
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-A PC-STATUS
+    CALL "cobpc_peer_endpoint" USING H-A EP-A PC-STATUS
+    MOVE "cbl-anon" TO PC-NODE-ID
+    MOVE SPACES TO PC-BIND-ENDPOINT PC-AUTH-TOKEN
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-B PC-STATUS
+    MOVE "x" TO WS-SEND-BUF(1:1)
+    MOVE 1 TO X-LEN
+    MOVE "m-a1" TO X-MID
+    MOVE 5000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_send" USING H-B EP-A WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    MOVE PC-E-AUTH TO WS-WANT
+    MOVE "auth: no token -> E_AUTH" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    CALL "cobpc_peer_close" USING H-B PC-STATUS
+    MOVE "cbl-wrong" TO PC-NODE-ID
+    MOVE "nope" TO PC-AUTH-TOKEN
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-B PC-STATUS
+    MOVE "m-a2" TO X-MID
+    CALL "cobpc_peer_send" USING H-B EP-A WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    MOVE "auth: wrong token -> E_AUTH" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    CALL "cobpc_peer_close" USING H-B PC-STATUS
+    MOVE "cbl-member" TO PC-NODE-ID
+    MOVE "qa-secret-1" TO PC-AUTH-TOKEN
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-B PC-STATUS
+    MOVE "m-a3" TO X-MID
+    CALL "cobpc_peer_send" USING H-B EP-A WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    MOVE PC-OK TO WS-WANT
+    MOVE "auth: right token delivers" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE H-A TO X-TO
+    PERFORM RECV-INTO-BUF
+    MOVE "auth: received from the member" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND PC-SENDER = "cbl-member" MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+
+    MOVE "cbl-open" TO PC-NODE-ID
+    MOVE "0.0.0.0:0" TO PC-BIND-ENDPOINT
+    MOVE SPACES TO PC-AUTH-TOKEN
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-X PC-STATUS
+    MOVE PC-E-CONFIG TO WS-WANT
+    MOVE "open: non-loopback without token -> E_CONFIG" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE "bad id" TO PC-NODE-ID
+    MOVE "127.0.0.1:0" TO PC-BIND-ENDPOINT
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-X PC-STATUS
+    MOVE PC-E-INVALID-ARGUMENT TO WS-WANT
+    MOVE "open: invalid node id" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+
+    MOVE "cbl-gone" TO PC-NODE-ID
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-X PC-STATUS
+    CALL "cobpc_peer_endpoint" USING H-X EP-X PC-STATUS
+    CALL "cobpc_peer_close" USING H-X PC-STATUS
+    MOVE "m-dead" TO X-MID
+    MOVE 3000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_send" USING H-B EP-X WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    MOVE PC-E-TRANSPORT TO WS-WANT
+    MOVE "send to a dead peer -> E_TRANSPORT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    CALL "cobpc_peer_close" USING H-A PC-STATUS
+    CALL "cobpc_peer_close" USING H-B PC-STATUS.
+
+TEST-HANDLES.
+    MOVE "cancel / close waking a blocked recv" TO WS-CHECK-NAME
+    MOVE "needs a second thread; GnuCOBOL has no threads" TO WS-CHECK-DETAIL
+    PERFORM SKIP-CHECK
+    MOVE "concurrent senders" TO WS-CHECK-NAME
+    MOVE "needs threads; GnuCOBOL has no threads" TO WS-CHECK-DETAIL
+    PERFORM SKIP-CHECK
+    MOVE "cbl-closing" TO PC-NODE-ID
+    MOVE "127.0.0.1:0" TO PC-BIND-ENDPOINT
+    MOVE SPACES TO PC-AUTH-TOKEN
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-Y PC-STATUS
+    CALL "cobpc_peer_cancel" USING H-Y PC-STATUS
+    MOVE PC-OK TO WS-WANT
+    MOVE "cancel with no blocked receiver -> OK" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    CALL "cobpc_peer_close" USING H-Y PC-STATUS
+    MOVE "close -> OK" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    CALL "cobpc_peer_close" USING H-Y PC-STATUS
+    MOVE PC-E-INVALID-HANDLE TO WS-WANT
+    MOVE "double close -> E_INVALID_HANDLE" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    CALL "cobpc_peer_endpoint" USING H-Y EP-X PC-STATUS
+    MOVE "endpoint after close -> E_INVALID_HANDLE" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE H-Y TO X-TO
+    MOVE 0 TO PC-TIMEOUT-MS
+    PERFORM RECV-INTO-BUF
+    MOVE "recv after close -> E_INVALID_HANDLE" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 0 TO H-X
+    CALL "cobpc_peer_close" USING H-X PC-STATUS
+    MOVE "close(0) -> E_INVALID_HANDLE" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 987654 TO H-X
+    CALL "cobpc_peer_cancel" USING H-X PC-STATUS
+    MOVE "cancel(unknown handle) -> E_INVALID_HANDLE" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS.
+
+TEST-BRIDGE.
+    MOVE "VERSION" TO B-OPERATION
+    MOVE SPACES TO B-INPUT
+    CALL "POLYCALL-BRIDGE" USING B-OPERATION B-INPUT B-OUTPUT B-RESULT
+    MOVE "bridge: VERSION" TO WS-CHECK-NAME
+    IF B-RESULT = 0 AND B-OUTPUT(1:12) = "libpolycall " MOVE "Y" TO WS-OK END-IF
+    MOVE B-OUTPUT TO WS-CHECK-DETAIL
+    PERFORM CHECK-RESULT
+    MOVE "CONNECT" TO B-OPERATION
+    MOVE "cbl-bridge" TO B-INPUT
+    CALL "POLYCALL-BRIDGE" USING B-OPERATION B-INPUT B-OUTPUT B-RESULT
+    MOVE SPACES TO B-WORD B-NODE B-EP
+    UNSTRING B-OUTPUT DELIMITED BY ALL SPACE INTO B-WORD B-NODE B-EP
+    MOVE "bridge: CONNECT opens a peer node" TO WS-CHECK-NAME
+    IF B-RESULT = 0 AND B-WORD = "CONNECTED" AND B-NODE = "cbl-bridge"
+       AND B-EP(1:10) = "127.0.0.1:"
+        MOVE "Y" TO WS-OK
+    END-IF
+    MOVE B-OUTPUT TO WS-CHECK-DETAIL
+    PERFORM CHECK-RESULT
+    MOVE "SEND_MESSAGE" TO B-OPERATION
+    MOVE SPACES TO B-INPUT
+    STRING FUNCTION TRIM(B-EP) " hello bridge" DELIMITED BY SIZE INTO B-INPUT
+    CALL "POLYCALL-BRIDGE" USING B-OPERATION B-INPUT B-OUTPUT B-RESULT
+    MOVE "bridge: SEND_MESSAGE to itself" TO WS-CHECK-NAME
+    IF B-RESULT = 0 AND B-OUTPUT = "MESSAGE_SENT" MOVE "Y" TO WS-OK END-IF
+    MOVE B-OUTPUT TO WS-CHECK-DETAIL
+    PERFORM CHECK-RESULT
+    MOVE "RECEIVE_MESSAGE" TO B-OPERATION
+    CALL "POLYCALL-BRIDGE" USING B-OPERATION B-INPUT B-OUTPUT B-RESULT
+    MOVE 0 TO WS-CNT
+    INSPECT B-OUTPUT TALLYING WS-CNT FOR ALL "hello bridge"
+    MOVE "bridge: RECEIVE_MESSAGE returns sender and payload" TO WS-CHECK-NAME
+    IF B-RESULT = 0 AND B-OUTPUT(1:11) = "cbl-bridge " AND WS-CNT = 1
+        MOVE "Y" TO WS-OK
+    END-IF
+    MOVE B-OUTPUT TO WS-CHECK-DETAIL
+    PERFORM CHECK-RESULT
+    MOVE "DISCONNECT" TO B-OPERATION
+    CALL "POLYCALL-BRIDGE" USING B-OPERATION B-INPUT B-OUTPUT B-RESULT
+    MOVE "bridge: DISCONNECT" TO WS-CHECK-NAME
+    IF B-RESULT = 0 AND B-OUTPUT = "DISCONNECTED" MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+    CALL "POLYCALL-BRIDGE" USING B-OPERATION B-INPUT B-OUTPUT B-RESULT
+    MOVE "bridge: second DISCONNECT reports E_INVALID_HANDLE" TO WS-CHECK-NAME
+    IF B-RESULT = PC-E-INVALID-HANDLE MOVE "Y" TO WS-OK END-IF
+    MOVE B-OUTPUT TO WS-CHECK-DETAIL
+    PERFORM CHECK-RESULT
+    MOVE "TELEPORT" TO B-OPERATION
+    CALL "POLYCALL-BRIDGE" USING B-OPERATION B-INPUT B-OUTPUT B-RESULT
+    MOVE "bridge: unknown operation" TO WS-CHECK-NAME
+    IF B-RESULT = PC-E-INVALID-ARGUMENT AND B-OUTPUT = "UNKNOWN_OPERATION"
+        MOVE "Y" TO WS-OK
+    END-IF
+    PERFORM CHECK-RESULT.
+
+TEST-INTEROP.
+    IF WS-CLI = SPACES OR WS-CLI-PEER = SPACES
+        MOVE "interop: polycall CLI peer -> COBOL" TO WS-CHECK-NAME
+        MOVE "POLYCALL_CLI/POLYCALL_CLI_PEER not set" TO WS-CHECK-DETAIL
+        PERFORM SKIP-CHECK
+        MOVE "interop: COBOL -> polycall CLI peer" TO WS-CHECK-NAME
+        MOVE "POLYCALL_CLI/POLYCALL_CLI_PEER not set" TO WS-CHECK-DETAIL
+        PERFORM SKIP-CHECK
+        EXIT PARAGRAPH
+    END-IF
+    MOVE "cbl-node" TO PC-NODE-ID
+    MOVE "127.0.0.1:0" TO PC-BIND-ENDPOINT
+    MOVE WS-TOKEN TO PC-AUTH-TOKEN
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-A PC-STATUS
+    CALL "cobpc_peer_endpoint" USING H-A EP-A PC-STATUS
+
+    *> CLI -> COBOL: exact bytes (incl. X"00" and X"FF"), sender, id
+    OPEN OUTPUT PAYLOAD-FILE
+    WRITE PAYLOAD-REC FROM WS-INTEROP
+    CLOSE PAYLOAD-FILE
+    MOVE SPACES TO WS-CMD
+    STRING '"' FUNCTION TRIM(WS-CLI) '" peer send --to ' FUNCTION TRIM(EP-A)
+        " --payload-file cbl_cli_payload.bin --from cli-node --id cli-to-cbl-1"
+        " -t 5000 > cbl_cli_send.log 2>&1"
+        DELIMITED BY SIZE INTO WS-CMD
+    CALL "SYSTEM" USING WS-CMD
+    MOVE RETURN-CODE TO WS-CNT
+    MOVE H-A TO X-TO
+    MOVE 5000 TO PC-TIMEOUT-MS
+    PERFORM RECV-INTO-BUF
+    MOVE "interop: polycall CLI peer send -> COBOL peer (bytes, sender, id)" TO WS-CHECK-NAME
+    IF WS-CNT = 0 AND PC-STATUS = PC-OK AND PC-SENDER = "cli-node"
+       AND PC-MESSAGE-ID = "cli-to-cbl-1" AND WS-RECV-LEN = 16
+       AND WS-RECV-BUF(1:16) = WS-INTEROP
+        MOVE "Y" TO WS-OK
+    END-IF
+    MOVE WS-CNT TO WS-NUM-A
+    MOVE PC-STATUS TO WS-NUM-B
+    STRING "system=" FUNCTION TRIM(WS-NUM-A) " recv=" FUNCTION TRIM(WS-NUM-B)
+        DELIMITED BY SIZE INTO WS-CHECK-DETAIL
+    PERFORM CHECK-RESULT
+
+    *> COBOL -> CLI node (registered id; identity checked by ping)
+    MOVE "cli-node" TO PC-PEER-ID
+    CALL "cobpc_peer_register" USING H-A PC-PEER-ID WS-CLI-PEER PC-STATUS
+    MOVE "cli-node" TO PC-TARGET
+    MOVE 3000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_ping" USING H-A PC-TARGET PC-TIMEOUT-MS PC-STATUS
+    MOVE PC-OK TO WS-WANT
+    MOVE "interop: ping the CLI node by id" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE WS-INTEROP TO WS-SEND-BUF(1:16)
+    MOVE 16 TO X-LEN
+    MOVE "cbl-to-cli-1" TO X-MID
+    MOVE 5000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_send" USING H-A PC-TARGET WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    MOVE PC-STATUS TO X-ST-SEND
+    MOVE SPACES TO WS-CMD
+    STRING '"' FUNCTION TRIM(WS-CLI) '" --format json peer recv --to '
+        FUNCTION TRIM(WS-CLI-PEER) " -t 5000 > cbl_cli_recv.json 2>&1"
+        DELIMITED BY SIZE INTO WS-CMD
+    CALL "SYSTEM" USING WS-CMD
+    MOVE RETURN-CODE TO WS-I
+    MOVE SPACES TO WS-JSON
+    OPEN INPUT JSON-FILE
+    IF WS-FS = "00"
+        READ JSON-FILE INTO WS-JSON
+        END-READ
+        CLOSE JSON-FILE
+    END-IF
+    MOVE "interop: COBOL peer -> polycall peer serve, read by polycall peer recv"
+      TO WS-CHECK-NAME
+    MOVE 0 TO WS-CNT
+    INSPECT WS-JSON TALLYING WS-CNT FOR ALL '"from":"cbl-node"'
+                                    WS-CNT FOR ALL '"id":"cbl-to-cli-1"'
+                                    WS-CNT FOR ALL '"payload_b64":"Y2JsAGJpbgH/IMOpIGVuZA=="'
+    IF X-ST-SEND = PC-OK AND WS-I = 0 AND WS-CNT = 3
+        MOVE "Y" TO WS-OK
+    END-IF
+    MOVE WS-JSON(1:300) TO WS-CHECK-DETAIL
+    PERFORM CHECK-RESULT
+    MOVE "rm -f cbl_cli_payload.bin cbl_cli_send.log cbl_cli_recv.json" TO WS-CMD
+    CALL "SYSTEM" USING WS-CMD
+    CALL "cobpc_peer_close" USING H-A PC-STATUS.

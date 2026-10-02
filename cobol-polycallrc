@@ -1,0 +1,14 @@
+# cobol-polycallrc - COBOL runtime overrides for Polycall
+#
+# Grammar: the core's own configuration grammar -- exactly what
+# `polycall config validate cobol-polycallrc` and polycall_ffi_run_config()
+# accept (Polycall core >= 1.1.0, https://github.com/obinexus/polycall). The
+# COBOL binding adds no keys and no parser: POLYCALL-BRIDGE VALIDATE and
+# cobpc_run_config pass this path to polycall_ffi_run_config(path, 1), which
+# validates it strictly for this build (unknown keys and tls_enabled=true are
+# rejected).
+
+log_level=info
+max_connections=1000
+network_timeout=5000
+tls_enabled=false

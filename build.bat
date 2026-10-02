@@ -49,6 +49,11 @@ if %errorlevel% == 0 (
     )
 )
 
+REM Polycall core (>= 1.1.0, binding ABI 1): POLYCALL_PREFIX = its install
+REM prefix (include\polycall, lib, bin). The cobpc_* C shim and the core are
+REM linked into every COBOL build; CALLs are resolved statically.
+set CBL_POLYCALL=-fstatic-call %CBL_SRC_DIR%\cobpolycall.c -I%POLYCALL_PREFIX%\include\polycall -L%POLYCALL_PREFIX%\lib -lpolycall
+
 REM Parse command line arguments
 set ACTION=%1
 if "%ACTION%"=="" set ACTION=all
@@ -240,6 +245,7 @@ goto :eof
 
 :build_shared
 echo %BLUE%[BUILD]%NC% Building shared library (.dll)...
+call :require_core || exit /b 2
 if not exist %CBL_LIB_DIR% mkdir %CBL_LIB_DIR%
 if not exist %CBL_CONFIG_DIR%\default.conf call :create_config
 
@@ -250,7 +256,7 @@ if not exist %CBL_SRC_DIR%\POLYCALL.CBL (
 )
 
 echo %BLUE%[BUILD]%NC% Compiling shared library with local configuration...
-%COBOL_COMPILER% -m --conf=%CBL_CONFIG_DIR%\default.conf -I%CBL_COPYBOOK_DIR% -o %CBL_LIB_DIR%\lib%CBL_PROJECT_NAME%.dll %CBL_SRC_DIR%\POLYCALL.CBL
+%COBOL_COMPILER% -m --conf=%CBL_CONFIG_DIR%\default.conf -I%CBL_COPYBOOK_DIR% -o %CBL_LIB_DIR%\lib%CBL_PROJECT_NAME%.dll %CBL_SRC_DIR%\POLYCALL.CBL %CBL_POLYCALL%
 
 if %errorlevel% == 0 (
     echo %GREEN%[SUCCESS]%NC% Shared library built: %CBL_LIB_DIR%\lib%CBL_PROJECT_NAME%.dll
@@ -262,16 +268,18 @@ goto :eof
 
 :build_static
 echo %BLUE%[BUILD]%NC% Building static library (.a)...
+call :require_core || exit /b 2
 if not exist %CBL_BUILD_DIR% mkdir %CBL_BUILD_DIR%
 if not exist %CBL_LIB_DIR% mkdir %CBL_LIB_DIR%
 if not exist %CBL_CONFIG_DIR%\default.conf call :create_config
 
 echo %BLUE%[BUILD]%NC% Compiling object file for static library...
-%COBOL_COMPILER% -c --conf=%CBL_CONFIG_DIR%\default.conf -I%CBL_COPYBOOK_DIR% -o %CBL_BUILD_DIR%\POLYCALL.o %CBL_SRC_DIR%\POLYCALL.CBL
+%COBOL_COMPILER% -c --conf=%CBL_CONFIG_DIR%\default.conf -I%CBL_COPYBOOK_DIR% -fstatic-call -o %CBL_BUILD_DIR%\POLYCALL.o %CBL_SRC_DIR%\POLYCALL.CBL
+if %errorlevel% == 0 %COBOL_COMPILER% -c -I%POLYCALL_PREFIX%\include\polycall -o %CBL_BUILD_DIR%\cobpolycall.o %CBL_SRC_DIR%\cobpolycall.c
 
 if %errorlevel% == 0 (
     echo %BLUE%[BUILD]%NC% Creating static archive...
-    ar rcs %CBL_LIB_DIR%\lib%CBL_PROJECT_NAME%.a %CBL_BUILD_DIR%\POLYCALL.o
+    ar rcs %CBL_LIB_DIR%\lib%CBL_PROJECT_NAME%.a %CBL_BUILD_DIR%\POLYCALL.o %CBL_BUILD_DIR%\cobpolycall.o
     if %errorlevel% == 0 (
         echo %GREEN%[SUCCESS]%NC% Static library built: %CBL_LIB_DIR%\lib%CBL_PROJECT_NAME%.a
     ) else (
@@ -286,6 +294,7 @@ goto :eof
 
 :build_executable
 echo %BLUE%[BUILD]%NC% Building executable with library linkage...
+call :require_core || exit /b 2
 if not exist %CBL_TARGET_DIR% mkdir %CBL_TARGET_DIR%
 if not exist %CBL_CONFIG_DIR%\default.conf call :create_config
 
@@ -299,7 +308,7 @@ if not exist %CBL_SRC_DIR%\MAIN.CBL (
 )
 
 echo %BLUE%[BUILD]%NC% Compiling executable with local library linkage...
-%COBOL_COMPILER% -x --conf=%CBL_CONFIG_DIR%\default.conf -I%CBL_COPYBOOK_DIR% -L%CBL_LIB_DIR% -l%CBL_PROJECT_NAME% -o %CBL_TARGET_DIR%\%CBL_PROJECT_NAME%.exe %CBL_SRC_DIR%\MAIN.CBL
+%COBOL_COMPILER% -x --conf=%CBL_CONFIG_DIR%\default.conf -I%CBL_COPYBOOK_DIR% -L%CBL_LIB_DIR% -l%CBL_PROJECT_NAME% -o %CBL_TARGET_DIR%\%CBL_PROJECT_NAME%.exe %CBL_SRC_DIR%\MAIN.CBL -fstatic-call -L%POLYCALL_PREFIX%\lib -lpolycall
 
 if %errorlevel% == 0 (
     echo %GREEN%[SUCCESS]%NC% Executable built with library linkage: %CBL_TARGET_DIR%\%CBL_PROJECT_NAME%.exe
@@ -312,11 +321,12 @@ goto :eof
 
 :build_standalone
 echo %BLUE%[BUILD]%NC% Building standalone executable...
+call :require_core || exit /b 2
 if not exist %CBL_TARGET_DIR% mkdir %CBL_TARGET_DIR%
 if not exist %CBL_CONFIG_DIR%\default.conf call :create_config
 
 echo %BLUE%[BUILD]%NC% Compiling standalone executable...
-%COBOL_COMPILER% -x --conf=%CBL_CONFIG_DIR%\default.conf -I%CBL_COPYBOOK_DIR% -o %CBL_TARGET_DIR%\%CBL_PROJECT_NAME%-standalone.exe %CBL_SRC_DIR%\MAIN.CBL %CBL_SRC_DIR%\POLYCALL.CBL
+%COBOL_COMPILER% -x --conf=%CBL_CONFIG_DIR%\default.conf -I%CBL_COPYBOOK_DIR% -o %CBL_TARGET_DIR%\%CBL_PROJECT_NAME%-standalone.exe %CBL_SRC_DIR%\MAIN.CBL %CBL_SRC_DIR%\POLYCALL.CBL %CBL_POLYCALL%
 
 if %errorlevel% == 0 (
     echo %GREEN%[SUCCESS]%NC% Standalone executable built: %CBL_TARGET_DIR%\%CBL_PROJECT_NAME%-standalone.exe
@@ -383,15 +393,25 @@ if exist "%TEST_EXECUTABLE%" (
 
 echo %BLUE%[TEST]%NC% Testing executable execution with library environment...
 REM Set library path for testing
-set PATH=%CBL_LIB_DIR%;%PATH%
-echo 5 | "%TEST_EXECUTABLE%" >nul 2>&1
+set PATH=%CBL_LIB_DIR%;%POLYCALL_PREFIX%\bin;%PATH%
+REM Smoke test only (the full checklist is tests\test_runner.sh): VERSION must
+REM answer from the real core; a failure fails the run.
+(echo VERSION& echo 5) | "%TEST_EXECUTABLE%" | findstr /C:"Output: libpolycall 1." >nul
 if %errorlevel% == 0 (
-    echo %GREEN%[PASS]%NC% Executable runs successfully with library support
+    echo %GREEN%[PASS]%NC% Executable reached libpolycall
 ) else (
-    echo %YELLOW%[WARNING]%NC% Executable test completed with exit code %errorlevel%
+    echo %RED%[FAIL]%NC% Executable did not report the libpolycall version
+    exit /b 1
 )
 
 echo %GREEN%[SUCCESS]%NC% Test suite completed
+goto :eof
+
+:require_core
+if "%POLYCALL_PREFIX%"=="" (
+    echo %RED%[ERROR]%NC% Set POLYCALL_PREFIX to an installed Polycall core prefix ^(polycall ^>= 1.1.0^)
+    exit /b 2
+)
 goto :eof
 
 :show_help

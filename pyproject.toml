@@ -1,0 +1,15 @@
+# QA descriptor for the Polycall binding matrix (read by polycall/qa/run_qa.py).
+# This repository is NOT a Python package and is not pip-installable;
+# its native manifest is Makefile.
+[tool.polycall.binding]
+name = "cobol-polycall"
+language = "COBOL"
+native_manifest = "Makefile"
+registry = "none"
+package = ""
+abi = 1
+support = "partial"
+linux_image = "node:22"
+build = "sh /qa/build-linux-core.sh && apt-get install -y gnucobol && export PKG_CONFIG_PATH=/opt/polycall/lib/pkgconfig LD_LIBRARY_PATH=/opt/polycall/lib PATH=/opt/polycall/bin:$PATH && make"
+test = "make test"
+windows_test = ""

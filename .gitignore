@@ -1,0 +1,9 @@
+/build/
+/target/
+/dist/
+*.o
+*.obj
+*.i
+*.lst
+.polycall-qa.*
+cbl_cli_*
