@@ -4,9 +4,10 @@
 *>   polycall-test <repo-root>
 *>
 *> Covers the checklist of the core's docs/BINDING_ABI.md through the
-*> cobpc_* shim and POLYCALL-BRIDGE. GnuCOBOL has no threads, so the
-*> checks that need a second thread (cancel / close waking a blocked
-*> receive, concurrent senders) are reported as SKIP. Checks that need
+*> cobpc_* shim and POLYCALL-BRIDGE. GnuCOBOL has no threads, so cancel /
+*> close waking a blocked receive (which needs a second thread in the
+*> process) are SKIP (not-applicable); concurrent senders are 4 polycall
+*> CLI processes sending into one COBOL node. Checks that need
 *> the C CLI read POLYCALL_CLI, POLYCALL_CLI_PEER, POLYCALL_RPC_ENDPOINT and
 *> POLYCALL_DEV_TOKEN (tests/run-real.sh); without them they print SKIP,
 *> never PASS. RETURN-CODE 1 on any FAIL.
@@ -95,6 +96,24 @@ COPY "POLYCALL-STRUCTURES.CPY".
 01  WS-INTEROP                  PIC X(16)
         VALUE X"63626C0062696E01FF20C3A920656E64".
 01  WS-INTEROP-B64              PIC X(24) VALUE "Y2JsAGJpbgH/IMOpIGVuZA==".
+*> the non-ASCII fixture name in tests/fixtures/, as its UTF-8 bytes
+01  WS-UNI-NAME                 PIC X(29) VALUE
+        X"C3BC6EC3AF63C3B864C3A92DE9858DE7BDAE2D706F6C7963616C6C7263".
+01  WS-TEN                      PIC X(10).
+01  WS-TEN-CAP                  BINARY-LONG VALUE 10.
+01  WS-NEG                      BINARY-LONG VALUE -1.
+01  WS-ID63                     PIC X(64).
+01  WS-MID63                    PIC X(64).
+01  WS-NUM-C                    PIC -(9)9.
+01  WS-NUM-D                    PIC -(9)9.
+01  WS-SEEN-TABLE.
+    05  WS-SEEN-ROW             OCCURS 4.
+        10  WS-SEEN             PIC X OCCURS 10.
+01  WS-T                        BINARY-LONG.
+01  WS-J                        BINARY-LONG.
+01  WS-DISTINCT                 BINARY-LONG.
+01  WS-DUPS                     BINARY-LONG.
+01  WS-BAD                      BINARY-LONG.
 
 01  B-OPERATION                 PIC X(20).
 01  B-INPUT                     PIC X(1024).
@@ -129,6 +148,7 @@ MAIN-PARA.
     PERFORM TEST-HANDLES
     PERFORM TEST-BRIDGE
     PERFORM TEST-INTEROP
+    PERFORM TEST-CONCURRENT-SENDERS
 
     MOVE WS-PASS TO WS-NUM-A
     MOVE WS-FAIL TO WS-NUM-B
@@ -328,7 +348,43 @@ TEST-RUN-CONFIG.
     CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
     MOVE PC-E-INVALID-ARGUMENT TO WS-WANT
     MOVE "run_config: blank path -> E_INVALID_ARGUMENT" TO WS-CHECK-NAME
-    PERFORM EXPECT-STATUS.
+    PERFORM EXPECT-STATUS
+
+    *> non-ASCII (UTF-8) file name: the bytes reach the core unchanged
+    MOVE SPACES TO PC-CONFIG-PATH
+    STRING FUNCTION TRIM(WS-ROOT) "/tests/fixtures/" WS-UNI-NAME DELIMITED BY SIZE
+        INTO PC-CONFIG-PATH
+    MOVE 1 TO PC-RUN
+    CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
+    MOVE PC-OK TO WS-WANT
+    MOVE "run_config: non-ASCII (UTF-8) path, strict" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 0 TO PC-RUN
+    CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
+    MOVE "run_config: non-ASCII (UTF-8) path, validate" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE SPACES TO WS-JSON
+    CALL "cobpc_describe" USING PC-CONFIG-PATH WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE 0 TO WS-CNT
+    INSPECT WS-JSON TALLYING WS-CNT FOR ALL "log_level"
+    MOVE "describe: non-ASCII (UTF-8) path" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND WS-CNT > 0 MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+    MOVE SPACES TO PC-CONFIG-PATH
+    STRING FUNCTION TRIM(WS-ROOT) "/tests/fixtures/missing-" WS-UNI-NAME
+        DELIMITED BY SIZE INTO PC-CONFIG-PATH
+    MOVE 1 TO PC-RUN
+    CALL "cobpc_run_config" USING PC-CONFIG-PATH PC-RUN PC-STATUS
+    CALL "cobpc_last_error" USING PC-DETAIL
+    MOVE PC-E-NOT-FOUND TO WS-WANT
+    MOVE "run_config: missing non-ASCII path -> E_NOT_FOUND" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 0 TO WS-CNT
+    INSPECT PC-DETAIL TALLYING WS-CNT FOR ALL WS-UNI-NAME
+    MOVE "run_config: last_error detail keeps the UTF-8 path bytes" TO WS-CHECK-NAME
+    IF WS-CNT > 0 MOVE "Y" TO WS-OK END-IF
+    MOVE PC-DETAIL TO WS-CHECK-DETAIL
+    PERFORM CHECK-RESULT.
 
 TEST-CALL.
     MOVE "127.0.0.1:1" TO PC-TARGET
@@ -342,6 +398,30 @@ TEST-CALL.
     MOVE PC-E-TRANSPORT TO WS-WANT
     MOVE "call: no runtime -> E_TRANSPORT" TO WS-CHECK-NAME
     PERFORM EXPECT-STATUS
+    *> timeout_ms must be 1..600000; BINARY-LONG -1 is UINT32_MAX
+    MOVE PC-E-INVALID-ARGUMENT TO WS-WANT
+    MOVE -1 TO PC-TIMEOUT-MS
+    CALL "cobpc_call" USING PC-TARGET PC-SERVICE PC-OPERATION WS-INPUT WS-INPUT-LEN
+        PC-TIMEOUT-MS WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE "call: timeout -1 (UINT32_MAX) -> E_INVALID_ARGUMENT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 0 TO PC-TIMEOUT-MS
+    CALL "cobpc_call" USING PC-TARGET PC-SERVICE PC-OPERATION WS-INPUT WS-INPUT-LEN
+        PC-TIMEOUT-MS WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE "call: timeout 0 -> E_INVALID_ARGUMENT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 600001 TO PC-TIMEOUT-MS
+    CALL "cobpc_call" USING PC-TARGET PC-SERVICE PC-OPERATION WS-INPUT WS-INPUT-LEN
+        PC-TIMEOUT-MS WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE "call: timeout 600001 -> E_INVALID_ARGUMENT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 1500 TO PC-TIMEOUT-MS
+    MOVE -1 TO WS-INPUT-LEN
+    CALL "cobpc_call" USING PC-TARGET PC-SERVICE PC-OPERATION WS-INPUT WS-INPUT-LEN
+        PC-TIMEOUT-MS WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE "call: negative input length -> E_INVALID_ARGUMENT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 2 TO WS-INPUT-LEN
     IF WS-RPC-EP = SPACES
         MOVE "call: success / unknown op / deadline / invalid input" TO WS-CHECK-NAME
         MOVE "POLYCALL_RPC_ENDPOINT not set (run via tests/run-real.sh)" TO WS-CHECK-DETAIL
@@ -374,6 +454,36 @@ TEST-CALL.
         MOVE "Y" TO WS-OK
     END-IF
     PERFORM CHECK-RESULT
+
+    MOVE "{}" TO WS-INPUT
+    MOVE 2 TO WS-INPUT-LEN
+    MOVE 600000 TO PC-TIMEOUT-MS
+    CALL "cobpc_call" USING PC-TARGET PC-SERVICE PC-OPERATION WS-INPUT WS-INPUT-LEN
+        PC-TIMEOUT-MS WS-JSON WS-JSON-CAP WS-JSON-LEN PC-STATUS
+    MOVE "call: timeout 600000 (the maximum) accepted" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND WS-JSON-LEN = 11 AND WS-JSON(1:11) = '{"echo":{}}'
+        MOVE "Y" TO WS-OK
+    END-IF
+    MOVE WS-JSON(1:100) TO WS-CHECK-DETAIL
+    PERFORM CHECK-RESULT
+    MOVE 3000 TO PC-TIMEOUT-MS
+
+    *> output field too small: E_TOO_LARGE + the size needed
+    MOVE "inventory" TO PC-SERVICE
+    MOVE "get" TO PC-OPERATION
+    MOVE '{"item_id":"widget-a"}' TO WS-INPUT
+    MOVE 22 TO WS-INPUT-LEN
+    MOVE 0 TO WS-JSON-LEN
+    CALL "cobpc_call" USING PC-TARGET PC-SERVICE PC-OPERATION WS-INPUT WS-INPUT-LEN
+        PC-TIMEOUT-MS WS-TINY WS-TINY-CAP WS-JSON-LEN PC-STATUS
+    MOVE PC-E-TOO-LARGE TO WS-WANT
+    MOVE "call: 4-byte output field -> E_TOO_LARGE" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE "call: E_TOO_LARGE reports the size needed (52)" TO WS-CHECK-NAME
+    IF WS-JSON-LEN = 52 MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+    MOVE "debug" TO PC-SERVICE
+    MOVE "echo" TO PC-OPERATION
 
     MOVE "inventory" TO PC-SERVICE
     MOVE "teleport" TO PC-OPERATION
@@ -645,6 +755,107 @@ TEST-PEERS.
     END-IF
     PERFORM CHECK-RESULT
 
+    *> a field of exactly the payload size
+    MOVE "m-exact" TO X-MID
+    MOVE 5000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_send" USING H-A EP-B WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    MOVE SPACES TO WS-TEN
+    MOVE 1000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_recv" USING H-B PC-TIMEOUT-MS PC-SENDER PC-MESSAGE-ID
+        WS-TEN WS-TEN-CAP WS-RECV-LEN PC-STATUS
+    MOVE "recv: field of exactly the payload size" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND WS-RECV-LEN = 10 AND WS-TEN = "0123456789"
+       AND PC-MESSAGE-ID = "m-exact"
+        MOVE "Y" TO WS-OK
+    END-IF
+    PERFORM CHECK-RESULT
+
+    *> poll (timeout 0) and PC-WAIT-FOREVER (-1 = UINT32_MAX)
+    MOVE H-B TO X-TO
+    MOVE 0 TO PC-TIMEOUT-MS
+    PERFORM RECV-INTO-BUF
+    MOVE PC-E-TIMEOUT TO WS-WANT
+    MOVE "recv: poll (timeout 0) on an empty inbox -> E_TIMEOUT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE "queued" TO WS-SEND-BUF(1:6)
+    MOVE 6 TO X-LEN
+    MOVE "m-queued" TO X-MID
+    MOVE 5000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_send" USING H-A EP-B WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    MOVE 0 TO PC-TIMEOUT-MS
+    PERFORM RECV-INTO-BUF
+    MOVE "recv: poll (timeout 0) returns a queued message" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND PC-MESSAGE-ID = "m-queued" MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+    MOVE "m-queued-2" TO X-MID
+    MOVE 5000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_send" USING H-A EP-B WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    MOVE PC-WAIT-FOREVER TO PC-TIMEOUT-MS
+    PERFORM NOW-CENTIS
+    MOVE WS-T1 TO WS-T0
+    PERFORM RECV-INTO-BUF
+    PERFORM NOW-CENTIS
+    MOVE "recv: PC-WAIT-FOREVER returns a queued message at once" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND PC-MESSAGE-ID = "m-queued-2"
+       AND (WS-T1 - WS-T0 < 200 OR WS-T1 < WS-T0)
+        MOVE "Y" TO WS-OK
+    END-IF
+    PERFORM CHECK-RESULT
+
+    *> negative lengths / capacities are refused by the shim
+    MOVE -1 TO X-LEN
+    MOVE "m-neg" TO X-MID
+    MOVE 5000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_send" USING H-A EP-B WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    MOVE PC-E-INVALID-ARGUMENT TO WS-WANT
+    MOVE "send: negative length -> E_INVALID_ARGUMENT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 0 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_recv" USING H-B PC-TIMEOUT-MS PC-SENDER PC-MESSAGE-ID
+        WS-RECV-BUF WS-NEG WS-RECV-LEN PC-STATUS
+    MOVE "recv: negative capacity -> E_INVALID_ARGUMENT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+
+    *> identifiers: 1..63 bytes; the PIC X(64) fields hold 63 + padding
+    MOVE SPACES TO WS-ID63 WS-MID63
+    MOVE ALL "n" TO WS-ID63(1:63)
+    MOVE ALL "m" TO WS-MID63(1:63)
+    MOVE WS-ID63 TO PC-NODE-ID
+    MOVE SPACES TO PC-BIND-ENDPOINT PC-AUTH-TOKEN
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-Y PC-STATUS
+    MOVE PC-OK TO WS-WANT
+    MOVE "ids: 63-byte node id accepted" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE SPACES TO PC-NODE-ID
+    CALL "cobpc_peer_node_id" USING H-Y PC-NODE-ID PC-STATUS
+    MOVE "ids: 63-byte node id round-trips" TO WS-CHECK-NAME
+    IF PC-STATUS = PC-OK AND PC-NODE-ID = WS-ID63 MOVE "Y" TO WS-OK END-IF
+    PERFORM CHECK-RESULT
+    MOVE "id63" TO WS-SEND-BUF(1:4)
+    MOVE 4 TO X-LEN
+    MOVE 5000 TO PC-TIMEOUT-MS
+    CALL "cobpc_peer_send" USING H-Y EP-B WS-SEND-BUF X-LEN WS-MID63 PC-TIMEOUT-MS PC-STATUS
+    MOVE PC-STATUS TO X-ST-SEND
+    MOVE H-B TO X-TO
+    PERFORM RECV-INTO-BUF
+    MOVE "ids: 63-byte sender and message id arrive intact" TO WS-CHECK-NAME
+    IF X-ST-SEND = PC-OK AND PC-STATUS = PC-OK AND PC-SENDER = WS-ID63
+       AND PC-MESSAGE-ID = WS-MID63
+        MOVE "Y" TO WS-OK
+    END-IF
+    PERFORM CHECK-RESULT
+    CALL "cobpc_peer_close" USING H-Y PC-STATUS
+    MOVE ALL "n" TO PC-NODE-ID
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-Y PC-STATUS
+    MOVE PC-E-INVALID-ARGUMENT TO WS-WANT
+    MOVE "ids: 64-byte node id -> E_INVALID_ARGUMENT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE ALL "m" TO X-MID
+    CALL "cobpc_peer_send" USING H-A EP-B WS-SEND-BUF X-LEN X-MID PC-TIMEOUT-MS PC-STATUS
+    MOVE "ids: 64-byte message id -> E_INVALID_ARGUMENT" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE 10 TO X-LEN
+
     *> send-only node
     MOVE "cbl-sendonly" TO PC-NODE-ID
     MOVE SPACES TO PC-BIND-ENDPOINT PC-AUTH-TOKEN
@@ -731,11 +942,20 @@ TEST-AUTH-TRANSPORT.
     CALL "cobpc_peer_close" USING H-B PC-STATUS.
 
 TEST-HANDLES.
-    MOVE "cancel / close waking a blocked recv" TO WS-CHECK-NAME
-    MOVE "needs a second thread; GnuCOBOL has no threads" TO WS-CHECK-DETAIL
+    *> A COBOL program has one thread: nothing can call cancel / close while
+    *> its own recv is blocked. (Concurrent senders into a COBOL node are
+    *> covered by TEST-CONCURRENT-SENDERS with separate CLI processes.)
+    MOVE "cancel wakes a blocked recv" TO WS-CHECK-NAME
+    MOVE "not-applicable: needs a second thread in this process; GnuCOBOL programs are single-threaded"
+      TO WS-CHECK-DETAIL
     PERFORM SKIP-CHECK
-    MOVE "concurrent senders" TO WS-CHECK-NAME
-    MOVE "needs threads; GnuCOBOL has no threads" TO WS-CHECK-DETAIL
+    MOVE "close wakes a blocked recv" TO WS-CHECK-NAME
+    MOVE "not-applicable: needs a second thread in this process; GnuCOBOL programs are single-threaded"
+      TO WS-CHECK-DETAIL
+    PERFORM SKIP-CHECK
+    MOVE "concurrent senders from threads of one COBOL process" TO WS-CHECK-NAME
+    MOVE "not-applicable: GnuCOBOL programs are single-threaded"
+      TO WS-CHECK-DETAIL
     PERFORM SKIP-CHECK
     MOVE "cbl-closing" TO PC-NODE-ID
     MOVE "127.0.0.1:0" TO PC-BIND-ENDPOINT
@@ -745,6 +965,13 @@ TEST-HANDLES.
     MOVE PC-OK TO WS-WANT
     MOVE "cancel with no blocked receiver -> OK" TO WS-CHECK-NAME
     PERFORM EXPECT-STATUS
+    MOVE H-Y TO X-TO
+    MOVE 150 TO PC-TIMEOUT-MS
+    PERFORM RECV-INTO-BUF
+    MOVE PC-E-TIMEOUT TO WS-WANT
+    MOVE "cancel: a later recv waits normally (E_TIMEOUT, not E_CANCELLED)" TO WS-CHECK-NAME
+    PERFORM EXPECT-STATUS
+    MOVE PC-OK TO WS-WANT
     CALL "cobpc_peer_close" USING H-Y PC-STATUS
     MOVE "close -> OK" TO WS-CHECK-NAME
     PERFORM EXPECT-STATUS
@@ -823,6 +1050,31 @@ TEST-BRIDGE.
     IF B-RESULT = PC-E-INVALID-ARGUMENT AND B-OUTPUT = "UNKNOWN_OPERATION"
         MOVE "Y" TO WS-OK
     END-IF
+    PERFORM CHECK-RESULT
+    IF WS-RPC-EP = SPACES
+        MOVE "bridge: CALL" TO WS-CHECK-NAME
+        MOVE "POLYCALL_RPC_ENDPOINT not set (run via tests/run-real.sh)" TO WS-CHECK-DETAIL
+        PERFORM SKIP-CHECK
+        EXIT PARAGRAPH
+    END-IF
+    MOVE "CALL" TO B-OPERATION
+    MOVE SPACES TO B-INPUT
+    STRING FUNCTION TRIM(WS-RPC-EP) ' debug echo {"x":[1,2]}' DELIMITED BY SIZE
+        INTO B-INPUT
+    CALL "POLYCALL-BRIDGE" USING B-OPERATION B-INPUT B-OUTPUT B-RESULT
+    MOVE "bridge: CALL debug.echo returns the output JSON" TO WS-CHECK-NAME
+    IF B-RESULT = 0 AND B-OUTPUT = '{"echo":{"x":[1,2]}}' MOVE "Y" TO WS-OK END-IF
+    MOVE B-OUTPUT TO WS-CHECK-DETAIL
+    PERFORM CHECK-RESULT
+    MOVE SPACES TO B-INPUT
+    STRING FUNCTION TRIM(WS-RPC-EP) " inventory teleport {}" DELIMITED BY SIZE
+        INTO B-INPUT
+    CALL "POLYCALL-BRIDGE" USING B-OPERATION B-INPUT B-OUTPUT B-RESULT
+    MOVE 0 TO WS-CNT
+    INSPECT B-OUTPUT TALLYING WS-CNT FOR ALL "operation.unknown"
+    MOVE "bridge: CALL unknown operation -> E_NOT_FOUND + error object" TO WS-CHECK-NAME
+    IF B-RESULT = PC-E-NOT-FOUND AND WS-CNT > 0 MOVE "Y" TO WS-OK END-IF
+    MOVE B-OUTPUT TO WS-CHECK-DETAIL
     PERFORM CHECK-RESULT.
 
 TEST-INTEROP.
@@ -907,5 +1159,83 @@ TEST-INTEROP.
     MOVE WS-JSON(1:300) TO WS-CHECK-DETAIL
     PERFORM CHECK-RESULT
     MOVE "rm -f cbl_cli_payload.bin cbl_cli_send.log cbl_cli_recv.json" TO WS-CMD
+    CALL "SYSTEM" USING WS-CMD
+    CALL "cobpc_peer_close" USING H-A PC-STATUS.
+
+*> Concurrent senders into one COBOL node: GnuCOBOL has no threads, so
+*> the senders are 4 separate polycall CLI processes (10 messages each)
+*> running at the same time; the node's listener (a core thread) stores
+*> them while the program waits in SYSTEM, then every message must be
+*> received exactly once with the right sender, id and payload.
+TEST-CONCURRENT-SENDERS.
+    MOVE "concurrent senders: 4 polycall CLI processes x 10 -> one COBOL node, each delivered once"
+      TO WS-CHECK-NAME
+    IF WS-CLI = SPACES
+        MOVE "POLYCALL_CLI not set (run via tests/run-real.sh)" TO WS-CHECK-DETAIL
+        PERFORM SKIP-CHECK
+        EXIT PARAGRAPH
+    END-IF
+    MOVE "cbl-fanin" TO PC-NODE-ID
+    MOVE "127.0.0.1:0" TO PC-BIND-ENDPOINT
+    MOVE WS-TOKEN TO PC-AUTH-TOKEN
+    CALL "cobpc_peer_open" USING PC-NODE-ID PC-BIND-ENDPOINT PC-AUTH-TOKEN H-A PC-STATUS
+    CALL "cobpc_peer_endpoint" USING H-A EP-A PC-STATUS
+    MOVE SPACES TO WS-CMD
+    STRING "rm -f cbl_cli_conc.fail; for t in 0 1 2 3; do ( for i in 0 1 2 3 4 5 6 7 8 9; do "
+        '"' FUNCTION TRIM(WS-CLI) '" peer send --to ' FUNCTION TRIM(EP-A)
+        " --payload t$t-$i --from cli-tx$t --id m-$t-$i -t 10000 >/dev/null 2>&1"
+        " || echo $t-$i >> cbl_cli_conc.fail; done ) & done; wait; test ! -e cbl_cli_conc.fail"
+        DELIMITED BY SIZE INTO WS-CMD
+    END-STRING
+    CALL "SYSTEM" USING WS-CMD
+    MOVE RETURN-CODE TO WS-I
+    MOVE SPACES TO WS-SEEN-TABLE
+    MOVE 0 TO WS-DISTINCT WS-DUPS WS-BAD
+    MOVE H-A TO X-TO
+    PERFORM VARYING WS-CNT FROM 1 BY 1 UNTIL WS-CNT > 40
+        MOVE 10000 TO PC-TIMEOUT-MS
+        PERFORM RECV-INTO-BUF
+        IF PC-STATUS NOT = PC-OK
+            ADD 1 TO WS-BAD
+            EXIT PERFORM
+        END-IF
+        IF PC-MESSAGE-ID(1:2) = "m-" AND PC-MESSAGE-ID(4:1) = "-"
+           AND PC-MESSAGE-ID(3:1) >= "0" AND PC-MESSAGE-ID(3:1) <= "3"
+           AND PC-MESSAGE-ID(5:1) IS NUMERIC AND PC-MESSAGE-ID(6:59) = SPACES
+           AND PC-SENDER(1:6) = "cli-tx" AND PC-SENDER(7:1) = PC-MESSAGE-ID(3:1)
+           AND PC-SENDER(8:57) = SPACES
+           AND WS-RECV-LEN = 4 AND WS-RECV-BUF(1:1) = "t"
+           AND WS-RECV-BUF(2:3) = PC-MESSAGE-ID(3:3)
+            COMPUTE WS-T = FUNCTION NUMVAL(PC-MESSAGE-ID(3:1)) + 1
+            COMPUTE WS-J = FUNCTION NUMVAL(PC-MESSAGE-ID(5:1)) + 1
+            IF WS-SEEN(WS-T, WS-J) = "Y"
+                ADD 1 TO WS-DUPS
+            ELSE
+                MOVE "Y" TO WS-SEEN(WS-T, WS-J)
+                ADD 1 TO WS-DISTINCT
+            END-IF
+        ELSE
+            ADD 1 TO WS-BAD
+        END-IF
+    END-PERFORM
+    *> and nothing more arrives
+    MOVE 300 TO PC-TIMEOUT-MS
+    PERFORM RECV-INTO-BUF
+    IF PC-STATUS NOT = PC-E-TIMEOUT
+        ADD 1 TO WS-DUPS
+    END-IF
+    IF WS-I = 0 AND WS-DISTINCT = 40 AND WS-DUPS = 0 AND WS-BAD = 0
+        MOVE "Y" TO WS-OK
+    END-IF
+    MOVE WS-I TO WS-NUM-A
+    MOVE WS-DISTINCT TO WS-NUM-B
+    MOVE WS-DUPS TO WS-NUM-C
+    MOVE WS-BAD TO WS-NUM-D
+    STRING "system=" FUNCTION TRIM(WS-NUM-A) " distinct=" FUNCTION TRIM(WS-NUM-B)
+        " duplicates=" FUNCTION TRIM(WS-NUM-C) " bad=" FUNCTION TRIM(WS-NUM-D)
+        DELIMITED BY SIZE INTO WS-CHECK-DETAIL
+    END-STRING
+    PERFORM CHECK-RESULT
+    MOVE "rm -f cbl_cli_conc.fail" TO WS-CMD
     CALL "SYSTEM" USING WS-CMD
     CALL "cobpc_peer_close" USING H-A PC-STATUS.
