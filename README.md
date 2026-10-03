@@ -93,18 +93,37 @@ through pkg-config:
 
 ```sh
 export PKG_CONFIG_PATH=/opt/polycall/lib/pkgconfig LD_LIBRARY_PATH=/opt/polycall/lib
-make            # target/cblpolycall
-make test       # tests/test_runner.sh
+make              # target/cblpolycall
+make test         # tests/test_runner.sh
+make test-loader  # missing library / old library / ABI mismatch (Linux)
+make memcheck     # the real-core test under valgrind memcheck
 printf 'VERSION\nCONNECT\nnode-a\nDISCONNECT\n' | target/cblpolycall
 ```
 
 `make test` builds `tests/POLYCALL-TEST.CBL` and runs it through
 `tests/run-real.sh`, which starts `polycall peer serve` and `polycall start`
 so RPC and cross-language interop are exercised against the C CLI; then it
-drives the client with a scripted session. GnuCOBOL has no threads, so the
-checks that need a second thread (cancel/close waking a blocked receive,
-concurrent senders) are reported as SKIP. A missing `cobc` or polycall CLI
-is reported as SKIP (exit 77), never as success.
+drives the client with a scripted session. A GnuCOBOL program has a single
+thread, so cancel / close waking a blocked receive (which needs a second
+thread in the same process) and concurrent senders from one COBOL process
+are reported as SKIP (not applicable); concurrent senders into a COBOL node
+are tested with four `polycall peer send` processes running at once. A
+missing `cobc`, polycall CLI or valgrind is reported as SKIP (exit 77), never
+as success.
+
+### Loading
+
+The shim is linked into the program and the program against the core
+(`-lpolycall`), so the dynamic loader resolves `libpolycall.so.1` when it
+starts. A missing library
+stops the program with the loader's `libpolycall.so.1: cannot open shared
+object file` (exit 127); a 1.0 library without the binding ABI v1 symbols
+with `undefined symbol: polycall_...` (exit 127); neither is a crash. A
+library that reports another binding ABI is refused: `cobpc_run_config`,
+`cobpc_describe`, `cobpc_call` and `cobpc_peer_open` return
+`PC-E-UNSUPPORTED` and do nothing; compare `cobpc_abi_version` with
+`PC-ABI-VERSION` to report it. `make test-loader` checks all three against
+fake libraries.
 
 ## Windows
 
