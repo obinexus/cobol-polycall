@@ -9,14 +9,18 @@
  * and COBOL text fields are fixed-length and space-padded. This shim adapts
  * exactly that and nothing else:
  *
- *   - Short text fields have the fixed sizes below (copybooks/POLYCALL-API.CPY
- *     declares them). Input text ends at the first trailing space or
- *     LOW-VALUE; output text is copied and padded with spaces.
+ *   - Short text fields have the fixed sizes below (group POLYCALL-API in
+ *     copybooks/POLYCALL-STRUCTURES.CPY declares them). Input text ends at
+ *     the first LOW-VALUE, without trailing spaces; output text is copied
+ *     and padded with spaces.
  *   - Byte data (payloads, JSON) travels as field + explicit BINARY-LONG
  *     length (input) or capacity + returned length (output); binary-safe,
  *     never padded or trimmed.
  *   - Integers (status, handle, timeout, run flag, lengths) are BINARY-LONG
  *     BY REFERENCE (int32). A timeout of -1 means "wait forever".
+ *   - cobpc_run_config, cobpc_describe, cobpc_call and cobpc_peer_open
+ *     return POLYCALL_E_UNSUPPORTED (and do nothing) when the loaded
+ *     library does not report binding ABI 1 (POLYCALL_FFI_ABI_VERSION).
  *   - Every function stores the core's status in its last argument and also
  *     returns it (RETURN-CODE). Status values are the core's POLYCALL_OK /
  *     POLYCALL_E_* codes, unchanged.

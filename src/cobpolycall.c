@@ -150,7 +150,10 @@ int cobpc_describe(const char path[COBPC_PATH_LEN], char *json, const int32_t *c
     int32_t c = value_or(cap, 0);
     char *tmp;
     int n;
-    if (!json || c < 0) {
+    if (polycall_ffi_abi_version() != POLYCALL_FFI_ABI_VERSION) {
+        return finish(POLYCALL_E_UNSUPPORTED, status);
+    }
+    if (!json || c < 0 || c == INT32_MAX) { /* c + 1 must fit the int length */
         return finish(POLYCALL_E_INVALID_ARGUMENT, status);
     }
     tmp = malloc((size_t)c + 1);
@@ -188,6 +191,12 @@ int cobpc_call(const char endpoint[COBPC_ENDPOINT_LEN], const char service[COBPC
     size_t got = 0;
     int st;
 
+    if (output_len) {
+        *output_len = 0;
+    }
+    if (polycall_ffi_abi_version() != POLYCALL_FFI_ABI_VERSION) {
+        return finish(POLYCALL_E_UNSUPPORTED, status);
+    }
     if (!output || cap < 0 || in_len < 0 || (in_len > 0 && !input)) {
         return finish(POLYCALL_E_INVALID_ARGUMENT, status);
     }
