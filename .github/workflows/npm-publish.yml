@@ -1,0 +1,163 @@
+name: npm package
+
+# Packs cobol-polycall, installs the tarball into a clean project, and builds
+# and tests the installed package there against a real Polycall core
+# >= 1.1.0 (binding ABI v1) built from the core repository. Runs on pull
+# requests and pushes; on a vX.Y.Z tag it then publishes that exact tarball
+# to npm with trusted publishing (OIDC) -- no npm token is stored anywhere.
+#
+# npm trusted publisher (package settings on npmjs.com): repository
+# obinexus/cobol-polycall, workflow npm-publish.yml, environment npm.
+# See README.md "Publishing setup".
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Core >= 1.1.0 (binding ABI v1) lives on the core repository's main
+  # branch; its default branch is still the 1.0 line.
+  POLYCALL_REPOSITORY: obinexus/polycall
+  POLYCALL_REF: main
+
+jobs:
+  verify:
+    name: Pack, install the tarball, build and test
+    runs-on: ubuntu-24.04
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Versions agree (package.json, Makefile, polycall-binding.json, build.bat, tag)
+        run: |
+          pkg=$(node -p "require('./package.json').version")
+          mk=$(sed -n 's/^VERSION = //p' Makefile)
+          manifest=$(node -p "require('./polycall-binding.json').version")
+          bat=$(tr -d '\r' < build.bat | sed -n 's/^set CBL_VERSION=//p')
+          echo "package.json=$pkg Makefile=$mk polycall-binding.json=$manifest build.bat=$bat"
+          [ "$pkg" = "$mk" ] && [ "$pkg" = "$manifest" ] && [ "$pkg" = "$bat" ] \
+            || { echo "::error::version mismatch"; exit 1; }
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME#v}" != "$pkg" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $pkg"; exit 1
+          fi
+
+      - name: Toolchain (GnuCOBOL, C compiler, pkg-config, CMake, valgrind)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            gnucobol build-essential pkg-config cmake valgrind
+          cobc --version | head -1
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.POLYCALL_REPOSITORY }}
+          ref: ${{ env.POLYCALL_REF }}
+          path: polycall-core
+
+      - name: Polycall core (>= 1.1.0) into $RUNNER_TEMP/polycall
+        run: |
+          prefix="$RUNNER_TEMP/polycall"
+          cmake -S polycall-core -B polycall-core/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$prefix" -DBUILD_TESTING=OFF
+          cmake --build polycall-core/build --parallel
+          cmake --install polycall-core/build
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$prefix/lib" >> "$GITHUB_ENV"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          rm -rf polycall-core
+
+      - name: Core version
+        run: |
+          pkg-config --modversion polycall
+          polycall --version
+
+      - id: pack
+        name: npm pack
+        run: |
+          npm pack --dry-run 2>&1 | tee pack.txt
+          if grep -E 'backup|bak/|pyproject|\.i$|target/|build/|\.github' pack.txt; then
+            echo "::error::unexpected files in the package"; exit 1
+          fi
+          tarball=$(npm pack --silent)
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          sha256sum "$tarball"
+
+      - name: Install the tarball into a clean project
+        run: |
+          mkdir "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE/${{ steps.pack.outputs.tarball }}"
+          npm ls cobol-polycall
+
+      - name: Build and test the installed package
+        working-directory: ${{ runner.temp }}/consumer/node_modules/cobol-polycall
+        run: |
+          npm run build
+          npm test
+          npm run test:loader
+          npm run test:memcheck
+
+      - name: Use the binding from the consumer project (README commands)
+        working-directory: ${{ runner.temp }}/consumer
+        run: |
+          # pkg-config output must split into separate compiler/linker flags
+          PC=node_modules/cobol-polycall
+          # shellcheck disable=SC2046
+          cc -c -fPIC $(pkg-config --cflags polycall) "$PC/src/cobpolycall.c" -o cobpolycall.o
+          # shellcheck disable=SC2046
+          cobc -x -fstatic-call -I "$PC/copybooks" -o version-check \
+               "$PC/examples/VERSION-CHECK.CBL" "$PC/src/POLYCALL.CBL" \
+               cobpolycall.o $(pkg-config --libs polycall)
+          ./version-check
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-tarball
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish to npm (trusted publishing)
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: verify
+    runs-on: ubuntu-24.04
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write   # OIDC token for npm trusted publishing (and provenance)
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: npm supports trusted publishing (>= 11.5.1)
+        run: |
+          npm --version
+          node -e 'const [a,b,c]=process.argv[1].split(".").map(Number); process.exit(a>11||(a===11&&(b>5||(b===5&&c>=1)))?0:1)' "$(npm --version)" \
+            || npm install -g npm@latest
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: npm-tarball
+
+      - name: Publish the tested tarball
+        run: npm publish "./${{ needs.verify.outputs.tarball }}" --access public

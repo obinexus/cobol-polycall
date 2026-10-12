@@ -9,6 +9,126 @@ Everything goes through the core's binding ABI (`<polycall.h>`,
 `docs/BINDING_ABI.md` in the core repository). This repository adds no
 protocol, parser or network code of its own.
 
+## Install from npm
+
+```
+npm install cobol-polycall
+```
+
+npm is only the delivery channel: it copies the **source** of the binding
+into `node_modules/cobol-polycall`. Nothing is compiled during
+installation, there is no JavaScript API, and npm does **not** install
+GnuCOBOL, a C compiler or the Polycall core -- you install those yourself
+(below) and build the binding with them.
+
+What the package contains:
+
+| Path | Contents |
+| --- | --- |
+| `src/POLYCALL.CBL`, `src/MAIN.CBL` | `POLYCALL-BRIDGE` (operation API) and the `CBLPOLYCALL-MAIN` client |
+| `src/cobpolycall.c`, `src/cobpolycall.h` | the `cobpc_*` C shim over the Polycall binding ABI v1 |
+| `copybooks/*.CPY` | status codes and work fields to `COPY` into your programs |
+| `examples/VERSION-CHECK.CBL` | the smallest program using the binding (see below) |
+| `Makefile`, `build.bat`, `config/default.conf` | Linux/macOS build and the Windows build |
+| `tests/` | the real-core test suite run by `npm test` |
+| `cobol-polycallrc`, `polycall-binding.json` | runtime overrides and the binding manifest |
+| `LICENSE.md` | OBINexus NT Open Access License |
+
+### Requirements
+
+| Needed for | Requirement | Debian / Ubuntu |
+| --- | --- | --- |
+| building | GnuCOBOL >= 3.1 (`cobc`) | `sudo apt install gnucobol` |
+| building | a C compiler, GNU make, pkg-config | `sudo apt install build-essential pkg-config` |
+| building and running | **Polycall core >= 1.1.0** (binding ABI v1): `libpolycall.so.1`, headers and `polycall.pc` | build from source, below |
+| `npm test` | the `polycall` CLI from the same core, on `PATH` | installed with the core |
+| `npm run test:memcheck` | valgrind (optional) | `sudo apt install valgrind` |
+
+The binding needs the binding ABI v1 that core **1.1.0** added. A 1.0 core
+(including the 1.0.0 Debian/Ubuntu packages of `polycall`) does not have
+it: programs then stop at start-up with `undefined symbol: polycall_...`.
+Build the core from its repository's `main` branch (the repository's
+default branch is still the 1.0 line):
+
+```sh
+git clone --branch main https://github.com/obinexus/polycall
+cmake -S polycall -B polycall/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/polycall
+cmake --build polycall/build --parallel
+sudo cmake --install polycall/build
+export PKG_CONFIG_PATH=/opt/polycall/lib/pkgconfig
+export LD_LIBRARY_PATH=/opt/polycall/lib
+export PATH=/opt/polycall/bin:$PATH
+pkg-config --modversion polycall   # must print 1.1.0 or later
+```
+
+### Build and test the installed package
+
+With the environment above:
+
+```sh
+cd node_modules/cobol-polycall
+npm run build              # make: target/cblpolycall
+npm test                   # make test: real-core tests + scripted client run
+npm run test:loader        # make test-loader: missing / old / wrong-ABI library (Linux)
+npm run test:memcheck      # make memcheck: the real-core test under valgrind
+printf 'VERSION\nCONNECT\nnode-a\nDISCONNECT\n' | target/cblpolycall
+```
+
+Without the core, `npm run build` stops with `pkg-config cannot find
+polycall (>= 1.1.0)`; without GnuCOBOL, or (for `npm test`) without the
+`polycall` CLI, the scripts print `SKIP: ...` and exit non-zero -- a
+missing prerequisite is never reported as a pass.
+
+### Use the binding in your own program
+
+`COPY` the copybooks, compile the shim once, and link your program with the
+bridge, the shim and the core. From the project that ran
+`npm install cobol-polycall` (`examples/VERSION-CHECK.CBL` is a complete
+program):
+
+```sh
+PC=node_modules/cobol-polycall
+cc -c -fPIC $(pkg-config --cflags polycall) "$PC/src/cobpolycall.c" -o cobpolycall.o
+cobc -x -fstatic-call -I "$PC/copybooks" -o version-check \
+     "$PC/examples/VERSION-CHECK.CBL" "$PC/src/POLYCALL.CBL" \
+     cobpolycall.o $(pkg-config --libs polycall)
+./version-check
+# version-check: libpolycall 1.1.0, binding ABI 1
+# version-check: POLYCALL-BRIDGE VERSION -> libpolycall 1.1.0 (binding ABI 1)
+```
+
+Replace `VERSION-CHECK.CBL` with your own source. `-fstatic-call` resolves
+`CALL "cobpc_..."` and `CALL "POLYCALL-BRIDGE"` at link time. The program
+needs `libpolycall.so.1` at run time: keep `LD_LIBRARY_PATH` set, or
+install the core under a prefix the dynamic loader already searches (for
+example `/usr/local` followed by `sudo ldconfig`). Leave `POLYCALL.CBL` out
+if you call the `cobpc_*` functions directly.
+
+On Windows, `build.bat` builds the same pieces from `POLYCALL_PREFIX` (see
+[Windows](#windows)); it has not yet been run end to end.
+
+### Publishing (maintainers)
+
+Releases are published by `.github/workflows/npm-publish.yml` when a
+`vX.Y.Z` tag matching `package.json` is pushed: it builds Polycall core
+1.1.0, packs the package, installs the tarball into a clean project, runs
+`npm run build`, `npm test`, `npm run test:loader` and
+`npm run test:memcheck` there, builds `examples/VERSION-CHECK.CBL` with the
+commands above, and publishes that exact tarball with npm trusted
+publishing (OIDC, no stored token). The same checks run on every pull
+request.
+
+A manual publication, from a clean checkout of the release commit after
+`npm login`:
+
+```
+npm pack --dry-run
+npm publish --access public
+```
+
+See [Publishing setup](#publishing-setup) for the one-time npm
+configuration.
+
 ## Layers
 
 | Layer | File | Role |
@@ -132,6 +252,32 @@ the core from `POLYCALL_PREFIX` (an installed Polycall prefix with
 `include\polycall`, `lib`, `bin`). It has not been run on Windows by QA (no
 GnuCOBOL on the QA host); `config\default.conf` uses GnuCOBOL 3.2
 configuration tags that 3.1 rejects.
+
+## Publishing setup
+
+One-time configuration by an owner of the `cobol-polycall` npm package. No
+npm token is stored in this repository or in GitHub secrets.
+
+1. npm sets up trusted publishers in a package's settings, so the first
+   version is published by hand: `npm login` (with two-factor
+   authentication), then, from a clean checkout of the release tag,
+   `npm pack --dry-run` and `npm publish --access public`.
+2. On npmjs.com, package `cobol-polycall` -> Settings -> Trusted
+   publishing -> GitHub Actions: organization/user `obinexus`, repository
+   `cobol-polycall`, workflow filename `npm-publish.yml`, environment `npm`.
+3. Settings -> Publishing access -> "Require two-factor authentication and
+   disallow tokens".
+
+Every later release: set the same version in `package.json`, `Makefile`
+(`VERSION`), `polycall-binding.json` and `build.bat` (`CBL_VERSION`), then
+push a `vX.Y.Z` tag. The workflow refuses a tag whose version does not
+match all four.
+
+## License
+
+OBINexus NT Open Access License: the MIT grant plus the "Use It, Respect
+It" additional terms -- not plain MIT. See [LICENSE.md](LICENSE.md);
+`package.json` declares it as `SEE LICENSE IN LICENSE.md`.
 
 ---
 

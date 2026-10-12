@@ -1,0 +1,53 @@
+{
+  "name": "cobol-polycall",
+  "version": "1.1.0",
+  "description": "GnuCOBOL binding for the Polycall core (binding ABI v1): COBOL bridge, copybooks and a C shim, built from source with GnuCOBOL against an installed Polycall core >= 1.1.0",
+  "keywords": [
+    "cobol",
+    "gnucobol",
+    "polycall",
+    "ffi",
+    "binding",
+    "copybook",
+    "rpc",
+    "interop",
+    "obinexus"
+  ],
+  "homepage": "https://github.com/obinexus/cobol-polycall#readme",
+  "bugs": {
+    "url": "https://github.com/obinexus/cobol-polycall/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/obinexus/cobol-polycall.git"
+  },
+  "license": "SEE LICENSE IN LICENSE.md",
+  "author": "Nnamdi Michael Okpala",
+  "files": [
+    "src/*.CBL",
+    "src/cobpolycall.c",
+    "src/cobpolycall.h",
+    "copybooks/*.CPY",
+    "examples/*.CBL",
+    "tests/*.CBL",
+    "tests/*.sh",
+    "tests/loader/*.c",
+    "tests/fixtures/",
+    "config/default.conf",
+    "cobol-polycallrc",
+    "polycall-binding.json",
+    "Makefile",
+    "build.bat",
+    "LICENSE.md"
+  ],
+  "scripts": {
+    "build": "make",
+    "test": "make test",
+    "test:loader": "make test-loader",
+    "test:memcheck": "make memcheck",
+    "clean": "make clean"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

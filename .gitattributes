@@ -1,2 +1,12 @@
-# Shell scripts must keep LF endings (Git Bash / Linux run them as-is).
-*.sh text eol=lf
+# Everything that is built or run on Linux/macOS (Makefile recipes, sh
+# scripts, COBOL/C sources, copybooks, configuration read by the core,
+# package.json) keeps LF in every checkout -- including Windows with
+# core.autocrlf=true, because `npm pack` / `npm publish` pack the working
+# tree byte for byte and a CRLF Makefile or script breaks on Linux.
+* text=auto eol=lf
+
+# Windows-only build files and legacy backups: keep their bytes as committed.
+*.bat               -text
+config/default.conf -text
+*.backup            -text
+bak/**              -text

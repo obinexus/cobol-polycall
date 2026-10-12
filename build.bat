@@ -8,7 +8,7 @@ setlocal enabledelayedexpansion
 
 REM Build configuration
 set CBL_PROJECT_NAME=cblpolycall
-set CBL_VERSION=1.0.0
+set CBL_VERSION=1.1.0
 set CBL_SRC_DIR=src
 set CBL_BUILD_DIR=build
 set CBL_TARGET_DIR=target
